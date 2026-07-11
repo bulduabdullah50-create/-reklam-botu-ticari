@@ -1,11 +1,7 @@
-import os
-import asyncio
-import re
-from telethon import TelegramClient, events
-
 # ----------------- SABİT AYARLAR -----------------
 API_ID = 38225321
-API_HASH = "48499b759e2281784608038c660df2d"
+API_import os
+HASH = "48499b759e2281784608038c660df2d"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # KENDİ TELEGRAM ID'NİZİ BURAYA YAZIN (Örn: 512345678)
