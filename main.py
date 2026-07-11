@@ -1,14 +1,18 @@
 import os
 from telethon import TelegramClient
 
-# Railway Variables kısmındaki isimlerle eşleşmeli
+# Railway Variables'tan çek
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Botu sadece token ile başlatmayı dene
+# Botu token ile değil, kullanıcı olarak başlat
+# Bu, kodun ilk çalıştığında senden telefon numarası ve kod isteyeceği anlamına gelir
 bot = TelegramClient('reklamci_ticari_session', API_ID, API_HASH)
-bot.start(bot_token=BOT_TOKEN)
 
-print("Bot başarıyla başlatıldı!")
-bot.run_until_disconnected()
+async def main():
+    await bot.start()
+    print("Bot başarıyla bağlandı!")
+    await bot.run_until_disconnected()
+
+import asyncio
+asyncio.run(main())
