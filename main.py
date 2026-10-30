@@ -9,24 +9,21 @@ from telethon.sessions import StringSession
 
 ADMIN_USERNAME = "farketmezda"
 
-# Telegram API Bilgileri (my.telegram.org adresinden ücretsiz alıp buraya veya Environment Variables'a ekleyebilirsin)
-API_ID = int(os.getenv("API_ID", "1234567"))  # Kendi API ID'ni buraya yazabilirsin
-API_HASH = os.getenv("API_HASH", "your_api_hash_here")
-
-# Aktif Esnek Keyler: { "KEY_KODU": (saniye, slot_limiti) }
 active_keys = {
     "FARKETMEZ-VIP-1AY": (2592000, 3),
 }
 
 user_licenses = {} 
 user_sessions = {}
+API_ID = int(os.getenv("API_ID", "1234567"))
+API_HASH = os.getenv("API_HASH", "your_api_hash_here")
 
 def get_user_session(user_id):
     if user_id not in user_sessions:
         user_sessions[user_id] = {
             "license_key": "Tanımlanmadı",
             "slot_limit": 3,
-            "accounts": [],  # [{"phone": "+90...", "client": TelegramClient, "status": "Aktif/Durduruldu"}]
+            "accounts": [],
             "excluded_groups": [],
             "login_state": None,
             "temp_phone": None,
@@ -45,7 +42,6 @@ def is_licensed(user_id, username):
             del user_licenses[user_id]
     return False
 
-# Ana Menü
 async def send_main_menu(update_or_query, text_title="👋 **Profesyonel Grup Otomasyon Paneline Hoş Geldiniz!**"):
     user = update_or_query.effective_user if hasattr(update_or_query, "effective_user") else update_or_query.from_user
     user_id = user.id
@@ -288,21 +284,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
         )
     elif data == "oto_dm":
-        await query.edit_message_text(text="🤖 **Oto DM Cevap Sistemi**\n\nAktif ve çalışır durumda.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        await query.edit_message_text(
+            text="🤖 **Oto DM Cevap Sistemi**\n\nAktif ve çalışır durumda.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        )
     elif data == "tavsiye":
-        await query.edit_message_text(text="💡 Tavsiye: Numaralarınızın Kayıtlı Mesajlar klasörüne reklamınızı yazmanız yeterlidir.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        await query.edit_message_text(
+            text="💡 Tavsiye: Numaralarınızın Kayıtlı Mesajlar klasörüne reklamınızı yazmanız yeterlidir.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        )
     elif data == "iletisim":
-        await query.edit_message_text(text="📞 **İletişim ve Lisans:**\n\nHer türlü destek, 1 ay - 4 ay veya özel key talebi için **@farketmezda** ile görüşebilirsiniz.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        await query.edit_message_text(
+            text="📞 **İletişim ve Lisans:**\n\nHer türlü destek, 1 ay - 4 ay veya özel key talebi için **@farketmezda** ile görüşebilirsiniz.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        )
     elif data == "sss":
-        await query.edit_message_text(text="❓ SSS: Botun reklama başlayabilmesi için hesaba giriş yapması (kod doğrulaması) zorunludur.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        await query.edit_message_text(
+            text="❓ SSS: Botun reklama başlayabilmesi için hesaba giriş yapması (kod doğrulaması) zorunludur.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        )
 
-# Mesaj Yakalama ve Telethon Kod Gönderim Akışı
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.from_user.username
     text = update.message.text.strip()
     
-    # 1. Key Giriş Kontrolü
     if text in active_keys:
         duration, slots = active_keys[text]
         user_licenses[user_id] = time.time() + duration
@@ -322,13 +328,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session = get_user_session(user_id)
 
-    # 2. Adım: Telefon Numarası Alındı -> Telethon ile Gerçek Kod Gönder
     if session.get("login_state") == "awaiting_phone":
         phone = text
         session["temp_phone"] = phone
         
         try:
-            # Telethon Client başlat ve Telegram'a kod isteği at
             client = TelegramClient(StringSession(), API_ID, API_HASH)
             await client.connect()
             sent = await client.send_code_request(phone)
@@ -347,8 +351,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Kod gönderilirken hata oluştu: `{str(e)}`\n\nNumaranızı doğru girdiğinizden emin olun ve tekrar deneyin.")
         return
 
-    # 3. Adım: Kod Alındı -> Telethon ile Girişi Tamamla
-    elif session.get("login_state") == "awaiting_code":
+    if session.get("login_state") == "awaiting_code":
         code = text.replace(" ", "")
         client = session.get("temp_client")
         phone = session.get("temp_phone")
@@ -358,7 +361,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
             session_string = client.session.save()
             
-            # Başarılı oturum kaydedilir
             new_acc = {
                 "phone": phone,
                 "session_string": session_string,
@@ -366,7 +368,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             session["accounts"].append(new_acc)
             
-            # Geçici verileri temizle
             session["login_state"] = None
             session.pop("temp_phone", None)
             session.pop("temp_client", None)
@@ -382,7 +383,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["login_state"] = None
         return
 
-    # 4. Aksi halde yazılan metin hariç tutulacak grup olarak işlenir
     session["excluded_groups"].append(text)
     await update.message.reply_text(
         f"🚫 **Grup Hariç Tutma Listesine Eklendi:**\n`{text}`\n\n"
