@@ -2,8 +2,9 @@ import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(os.getenv("DATABASE_PATH", "data/bot.db"))
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "farketmezda.sqlite3"
 
 
 def connect():
@@ -16,79 +17,90 @@ def init_db():
     with connect() as db:
         db.executescript("""
         CREATE TABLE IF NOT EXISTS users (
-            telegram_id INTEGER PRIMARY KEY,
-            session TEXT,
-            api_id INTEGER,
-            api_hash TEXT,
-            ad_text TEXT DEFAULT '',
-            interval INTEGER DEFAULT 3600,
-            enabled INTEGER DEFAULT 0
+            user_id INTEGER PRIMARY KEY,
+            interval_seconds INTEGER NOT NULL DEFAULT 3600,
+            ad_message_id INTEGER,
+            enabled INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS approved_groups (
             user_id INTEGER NOT NULL,
             chat_id INTEGER NOT NULL,
             title TEXT NOT NULL,
+            approved_by INTEGER NOT NULL,
             PRIMARY KEY(user_id, chat_id)
         );
         """)
 
 
-def get_user(user_id):
-    with connect() as db:
-        row = db.execute(
-            "SELECT * FROM users WHERE telegram_id=?",
-            (user_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-
-def create_user(user_id):
+def ensure_user(user_id):
     with connect() as db:
         db.execute(
-            "INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",
+            "INSERT OR IGNORE INTO users(user_id) VALUES(?)",
             (user_id,)
         )
 
 
-def update_user(user_id, **values):
+def get_user(user_id):
+    ensure_user(user_id)
+    with connect() as db:
+        row = db.execute(
+            "SELECT * FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+        return dict(row)
+
+
+def set_user(user_id, **values):
     allowed = {
-        "session", "api_id", "api_hash",
-        "ad_text", "interval", "enabled"
+        "interval_seconds",
+        "ad_message_id",
+        "enabled"
     }
-    values = {k: v for k, v in values.items() if k in allowed}
+    values = {
+        key: value
+        for key, value in values.items()
+        if key in allowed
+    }
+
     if not values:
         return
 
-    columns = ", ".join(f"{k}=?" for k in values)
+    ensure_user(user_id)
+    columns = ", ".join(
+        f"{key}=?" for key in values
+    )
+
     with connect() as db:
         db.execute(
-            f"UPDATE users SET {columns} WHERE telegram_id=?",
+            f"UPDATE users SET {columns} WHERE user_id=?",
             (*values.values(), user_id)
         )
 
 
-def add_group(user_id, chat_id, title):
+def approve_group(user_id, chat_id, title, approved_by):
     with connect() as db:
-        db.execute(
-            """INSERT OR REPLACE INTO approved_groups
-            (user_id, chat_id, title) VALUES (?, ?, ?)""",
-            (user_id, chat_id, title)
-        )
+        db.execute("""
+            INSERT OR REPLACE INTO approved_groups
+            (user_id, chat_id, title, approved_by)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, chat_id, title, approved_by))
 
 
 def remove_group(user_id, chat_id):
     with connect() as db:
-        db.execute(
-            "DELETE FROM approved_groups WHERE user_id=? AND chat_id=?",
-            (user_id, chat_id)
-        )
+        db.execute("""
+            DELETE FROM approved_groups
+            WHERE user_id=? AND chat_id=?
+        """, (user_id, chat_id))
 
 
-def get_groups(user_id):
+def groups_for(user_id):
     with connect() as db:
-        rows = db.execute(
-            "SELECT * FROM approved_groups WHERE user_id=?",
-            (user_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        rows = db.execute("""
+            SELECT * FROM approved_groups
+            WHERE user_id=?
+            ORDER BY title
+        """, (user_id,)).fetchall()
+
+        return [dict(row) for row in rows]
