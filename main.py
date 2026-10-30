@@ -9,17 +9,16 @@ from telethon.sessions import StringSession
 
 ADMIN_USERNAME = "farketmezda"
 
-# Token ve API Bilgilerini Güvenli Kontrol Etme
 TOKEN = os.getenv("BOT_TOKEN")
 RAW_API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
 if not TOKEN:
-    raise ValueError("HATA: BOT_TOKEN çevre değişkeni (Environment Variable) Render'da tanımlı değil!")
+    raise ValueError("HATA: BOT_TOKEN çevre değişkeni Render'da tanımlı değil!")
 if not RAW_API_ID:
-    raise ValueError("HATA: API_ID çevre değişkeni (Environment Variable) Render'da tanımlı değil!")
+    raise ValueError("HATA: API_ID çevre değişkeni Render'da tanımlı değil!")
 if not API_HASH:
-    raise ValueError("HATA: API_HASH çevre değişkeni (Environment Variable) Render'da tanımlı değil!")
+    raise ValueError("HATA: API_HASH çevre değişkeni Render'da tanımlı değil!")
 
 API_ID = int(RAW_API_ID)
 
