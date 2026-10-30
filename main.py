@@ -9,14 +9,26 @@ from telethon.sessions import StringSession
 
 ADMIN_USERNAME = "farketmezda"
 
+# Token ve API Bilgilerini Güvenli Kontrol Etme
+TOKEN = os.getenv("BOT_TOKEN")
+RAW_API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+
+if not TOKEN:
+    raise ValueError("HATA: BOT_TOKEN çevre değişkeni (Environment Variable) Render'da tanımlı değil!")
+if not RAW_API_ID:
+    raise ValueError("HATA: API_ID çevre değişkeni (Environment Variable) Render'da tanımlı değil!")
+if not API_HASH:
+    raise ValueError("HATA: API_HASH çevre değişkeni (Environment Variable) Render'da tanımlı değil!")
+
+API_ID = int(RAW_API_ID)
+
 active_keys = {
     "FARKETMEZ-VIP-1AY": (2592000, 3),
 }
 
 user_licenses = {} 
 user_sessions = {}
-API_ID = int(os.getenv("API_ID", "1234567"))
-API_HASH = os.getenv("API_HASH", "your_api_hash_here")
 
 def get_user_session(user_id):
     if user_id not in user_sessions:
@@ -391,8 +403,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 if __name__ == '__main__':
-    token = os.getenv("BOT_TOKEN")
-    app = ApplicationBuilder().token(token).read_timeout(30).write_timeout(30).connect_timeout(30).build()
+    app = ApplicationBuilder().token(TOKEN).read_timeout(30).write_timeout(30).connect_timeout(30).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
