@@ -1,412 +1,463 @@
+
 import os
-import time
-import random
-import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+import secrets
+import logging
 
-ADMIN_USERNAME = "farketmezda"
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-TOKEN = os.getenv("BOT_TOKEN")
-RAW_API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
+import database
 
-if not TOKEN:
-    raise ValueError("HATA: BOT_TOKEN çevre değişkeni Render'da tanımlı değil!")
-if not RAW_API_ID:
-    raise ValueError("HATA: API_ID çevre değişkeni Render'da tanımlı değil!")
-if not API_HASH:
-    raise ValueError("HATA: API_HASH çevre değişkeni Render'da tanımlı değil!")
 
-API_ID = int(RAW_API_ID)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-active_keys = {
-    "FARKETMEZ-VIP-1AY": (2592000, 3),
-}
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
-user_licenses = {} 
-user_sessions = {}
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN ortam değişkeni eksik.")
 
-def get_user_session(user_id):
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {
-            "license_key": "Tanımlanmadı",
-            "slot_limit": 3,
-            "accounts": [],
-            "excluded_groups": [],
-            "login_state": None,
-            "temp_phone": None,
-            "temp_client": None,
-            "temp_hash": None
-        }
-    return user_sessions[user_id]
+if not ADMIN_ID or not ADMIN_ID.isdigit():
+    raise RuntimeError("ADMIN_ID ortam değişkeni eksik veya hatalı.")
 
-def is_licensed(user_id, username):
-    if username and username.lower() == ADMIN_USERNAME.lower():
-        return True
-    if user_id in user_licenses:
-        if time.time() < user_licenses[user_id]:
-            return True
-        else:
-            del user_licenses[user_id]
-    return False
+ADMIN_ID = int(ADMIN_ID)
 
-async def send_main_menu(update_or_query, text_title="👋 **Profesyonel Grup Otomasyon Paneline Hoş Geldiniz!**"):
-    user = update_or_query.effective_user if hasattr(update_or_query, "effective_user") else update_or_query.from_user
-    user_id = user.id
-    username = user.username
-    
-    licensed = is_licensed(user_id, username)
-    is_admin = username and username.lower() == ADMIN_USERNAME.lower()
-    
-    if not licensed:
-        keyboard = [
-            [InlineKeyboardButton("🔑 Key Aktif Et", callback_data="key_gir")],
-            [InlineKeyboardButton("🛡️ Lisans Bilgim", callback_data="lisans_bilgi")],
-            [InlineKeyboardButton("📞 İletişim", callback_data="iletisim")],
-            [InlineKeyboardButton("🏠 Ana Menü", callback_data="ana_menu")]
-        ]
-        text = f"{text_title}\n\n❌ **Aktif Lisansınız Bulunmuyor!**\n\nLisans almak için **@farketmezda** ile iletişime geçebilirsiniz."
-    else:
-        keyboard = [
-            [InlineKeyboardButton("🚀 Reklam Otomasyonunu Başlat", callback_data="tekli_baslat"),
-             InlineKeyboardButton("🤖 Sadece Oto DM Cevap", callback_data="oto_dm")],
-            [InlineKeyboardButton("👥 Hesaplarım & Oturumlar", callback_data="hesaplarim"),
-             InlineKeyboardButton("🚫 Hariç Tutulan Gruplar", callback_data="haric_gruplar_menu")],
-            [InlineKeyboardButton("🛡️ Lisans Bilgim", callback_data="lisans_bilgi")],
-        ]
-        
-        if is_admin:
-            keyboard.append([InlineKeyboardButton("👑 Yönetici Esnek Key Paneli (@farketmezda)", callback_data="admin_panel")])
-            
-        keyboard.extend([
-            [InlineKeyboardButton("💡 Tavsiye", callback_data="tavsiye"),
-             InlineKeyboardButton("📞 İletişim", callback_data="iletisim")],
-            [InlineKeyboardButton("❓ Sık Sorulan Sorular", callback_data="sss")],
-            [InlineKeyboardButton("🏠 Ana Menü", callback_data="ana_menu")]
-        ])
-        text = f"{text_title}\n\n✅ **Sistem Aktif.** Numaralar kendi *Kayıtlı Mesajlar* içeriğini kanallar hariç tüm gruplara otomatik atar."
+database.init_db()
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if hasattr(update_or_query, "message") and update_or_query.message:
-        await update_or_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    else:
-        await update_or_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+
+def main_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📢 Reklam Yönetimi", callback_data="ads"),
+            InlineKeyboardButton("👥 Hesaplarım", callback_data="accounts"),
+        ],
+        [
+            InlineKeyboardButton("🗂 İzinli Gruplar", callback_data="groups"),
+            InlineKeyboardButton("🚫 Hariç Tutulanlar", callback_data="excluded"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Ayarlar", callback_data="settings"),
+            InlineKeyboardButton("💎 Lisans Bilgilerim", callback_data="license"),
+        ],
+        [
+            InlineKeyboardButton("🔑 Lisans Anahtarı Kullan", callback_data="redeem"),
+        ],
+    ])
+
+
+def admin_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Key Oluştur", callback_data="create_key")],
+        [InlineKeyboardButton("🏠 Ana Menü", callback_data="home")],
+    ])
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_main_menu(update)
+    user = update.effective_user
 
-async def show_accounts_screen(query, session):
-    acc_text = ""
-    if session["accounts"]:
-        for idx, acc in enumerate(session["accounts"], 1):
-            st = "🟢 Oturum Açık & Reklamda" if acc["status"] == "Aktif" else "🔴 Durduruldu"
-            acc_text += f"{idx}) 📞 `{acc['phone']}`\nDurum: {st}\n\n"
-    else:
-        acc_text = "• Henüz eklenmiş bir Telegram hesabı yok.\n\n"
-
-    keyboard = [
-        [InlineKeyboardButton("➕ Hesap Ekle (Gerçek Kod ile Giriş)", callback_data="hesap_ekle"),
-         InlineKeyboardButton("🗑️ Hesabı Sil", callback_data="hesap_sil")],
-        [InlineKeyboardButton("▶️ Reklamı Başlat", callback_data="hesap_baslat"),
-         InlineKeyboardButton("🔴 Durdur", callback_data="durdur_islem")],
-        [InlineKeyboardButton("🏠 Ana Menü", callback_data="ana_menu")]
-    ]
-    await query.edit_message_text(
-        text=f"👥 **Telegram Hesap ve Oturum Yönetimi**\n\n"
-             f"📦 Slot Kullanımı: {len(session['accounts'])} / {session['slot_limit']} (Maksimum 3 Numara)\n\n"
-             f"{acc_text}"
-             f"💡 *Sistem Notu:* Ekle butonuna basınca numaranıza Telegram üzerinden resmi giriş kodu gönderilir.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+    text = (
+        "✨ FARKETMEZ PANEL\n\n"
+        "Profesyonel yönetim paneline hoş geldin.\n\n"
+        "Devam etmek için aşağıdaki menüyü kullan."
     )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        text,
+        reply_markup=main_menu(),
+    )
+
+    if is_admin(user.id):
+        await update.message.reply_text(
+            "👑 Yönetici paneli",
+            reply_markup=admin_menu(),
+        )
+
+
+async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Telegram kullanıcı ID'n: `{update.effective_user.id}`",
+        parse_mode="Markdown",
+    )
+
+
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     query = update.callback_query
     await query.answer()
-    
-    user = query.from_user
-    user_id = user.id
-    username = user.username
-    licensed = is_licensed(user_id, username)
-    session = get_user_session(user_id)
-    data = query.data
-    
-    if data == "ana_menu":
-        session["login_state"] = None
-        await send_main_menu(query, text_title="🏠 **Ana Menüye Dönüldü**")
-        return
 
-    if not licensed and data not in ["iletisim", "sss", "lisans_bilgi", "key_gir"]:
-        await query.answer("❌ Bu işlem için lisans gereklidir!", show_alert=True)
-        return
+    user_id = query.from_user.id
+    action = query.data
 
-    if data == "key_gir":
+    if action == "home":
         await query.edit_message_text(
-            text="🔑 **Lisans Key Aktifleştirme**\n\nLütfen @farketmezda'dan aldığınız anahtarı doğrudan bu sohbete mesaj olarak yazın.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+            "✨ FARKETMEZ PANEL\n\nAna menü:",
+            reply_markup=main_menu(),
         )
+        return
 
-    elif data == "admin_panel":
-        if username and username.lower() == ADMIN_USERNAME.lower():
-            keyboard = [
-                [InlineKeyboardButton("➕ 1 Günlük Key Üret", callback_data="gen_1gun"),
-                 InlineKeyboardButton("➕ 1 Aylık Key Üret", callback_data="gen_1ay")],
-                [InlineKeyboardButton("➕ 4 Aylık Key Üret", callback_data="gen_4ay"),
-                 InlineKeyboardButton("➕ Sınırsız / VIP Key Üret", callback_data="gen_sinirsiz")],
-                [InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]
-            ]
+    if action == "create_key":
+        if not is_admin(user_id):
+            await query.edit_message_text("⛔ Bu alan sadece yöneticiye açıktır.")
+            return
+
+        context.user_data["state"] = "key_duration"
+        await query.edit_message_text(
+            "🔑 Yeni lisans oluşturma\n\n"
+            "Lisans süresini saat cinsinden gönder.\n"
+            "Örnek: 720 = 30 gün"
+        )
+        return
+
+    if action == "redeem":
+        context.user_data["state"] = "redeem_key"
+        await query.edit_message_text(
+            "🔐 Lisans anahtarını gönder:"
+        )
+        return
+
+    if action == "license":
+        if not database.license_is_valid(user_id):
             await query.edit_message_text(
-                text="👑 **Yönetici Esnek Key Paneli (@farketmezda)**\n\nİstediğiniz sürede key üretip kullanıcılara verebilirsiniz:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
+                "❌ Aktif lisans bulunamadı.",
+                reply_markup=main_menu(),
             )
-        else:
-            await query.answer("❌ Bu alana sadece @farketmezda erişebilir!", show_alert=True)
+            return
 
-    elif data.startswith("gen_"):
-        if username and username.lower() == ADMIN_USERNAME.lower():
-            rand_code = ''.join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=6))
-            if data == "gen_1gun":
-                key_name = f"FARKETMEZ-1GUN-{rand_code}"
-                active_keys[key_name] = (86400, 3)
-                s_str = "1 Günlük"
-            elif data == "gen_1ay":
-                key_name = f"FARKETMEZ-1AY-{rand_code}"
-                active_keys[key_name] = (2592000, 3)
-                s_str = "1 Aylık"
-            elif data == "gen_4ay":
-                key_name = f"FARKETMEZ-4AY-{rand_code}"
-                active_keys[key_name] = (10368000, 3)
-                s_str = "4 Aylık"
-            else:
-                key_name = f"FARKETMEZ-VIP-{rand_code}"
-                active_keys[key_name] = (31536000, 3)
-                s_str = "Sınırsız / 1 Yıllık"
-                
-            await query.edit_message_text(
-                text=f"✅ **{s_str} Key Başarıyla Üretildi!**\n\n🔑 Kodunuz:\n`{key_name}`\n\nBu key 3 numara slotu ve tam otomasyon yetkisi sağlar.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Yönetici Paneline Dön", callback_data="admin_panel")]])
-            )
-
-    elif data == "haric_gruplar_menu":
-        ex_list = "\n".join([f"• {g}" for g in session["excluded_groups"]]) if session["excluded_groups"] else "• Hariç tutulan grup yok."
-        keyboard = [
-            [InlineKeyboardButton("🗑️ Listeyi Temizle", callback_data="grup_temizle_haric")],
-            [InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]
-        ]
         await query.edit_message_text(
-            text=f"🚫 **Mesaj Gitmeyecek Hariç Tutulan Gruplar**\n\n{ex_list}\n\nİstediğiniz grubun adını bota yazarak bu listeye ekleyebilirsiniz.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
+            "💎 Lisansın aktif.\n\n"
+            "Süre bilgisi lisans anahtarının kayıtlarından kontrol edilir.",
+            reply_markup=main_menu(),
         )
-
-    elif data == "grup_temizle_haric":
-        session["excluded_groups"] = []
-        await query.answer("Liste temizlendi.", show_alert=True)
-        await button_handler(update, context)
-
-    elif data == "lisans_bilgi":
-        if username and username.lower() == ADMIN_USERNAME.lower():
-            text = (
-                f"🔑 **Aktif lisans sayısı:** {len(user_licenses) + 1}\n"
-                f"💻 **Aktif oturum sayısı:** {len(user_sessions)}\n\n"
-                f"🔒 **Lisans Bilgilerin (Yönetici)**\n\n"
-                f"👤 **Müşteri Adı:** {user.first_name}\n"
-                f"🔑 **Lisans Anahtarı:** SINIRSIZ-ADMIN-FARKETMEZDA\n"
-                f"⏳ **Kalan Süre:** Sınırsız\n"
-                f"👥 **Kullanıcı Limiti (Slot):** 3 Numara\n"
-                f"⚙️ **Durum:** 🟢 Aktif\n\n"
-                f"✉️ Lisans almak veya süreni uzatmak için **@farketmezda** ile iletişime geçebilirsin."
-            )
-        else:
-            if user_id in user_licenses:
-                kalan_saniye = int(user_licenses[user_id] - time.time())
-                gün = kalan_saniye // 86400
-                saat = (kalan_saniye % 86400) // 3600
-                kalan_str = f"{gün} gün {saat} saat" if kalan_saniye > 0 else "Süre Doldu"
-                bitis_zamani = time.strftime('%Y-%m-%d', time.localtime(user_licenses[user_id]))
-                durum_str = "🟢 Aktif" if kalan_saniye > 0 else "🔴 Durdurulmuş"
-            else:
-                kalan_str = "0 gün"
-                bitis_zamani = "Yok"
-                durum_str = "🔴 Durdurulmuş"
-
-            text = (
-                f"🔒 **Lisans Bilgilerin**\n\n"
-                f"👤 **Müşteri Adı:** {user.first_name}\n"
-                f"🔑 **Lisans Anahtarı:** {session['license_key']}\n"
-                f"📅 **Bitiş Tarihi:** {bitis_zamani}\n"
-                f"⏳ **Kalan Süre:** {kalan_str}\n"
-                f"👥 **Kullanıcı Limiti (Slot):** {session['slot_limit']} Numara\n"
-                f"⚙️ **Durum:** {durum_str}\n\n"
-                f"✉️ Lisans almak veya süreni uzatmak için **@farketmezda** ile iletişime geçebilirsin."
-            )
-
-        keyboard = [[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]]
-        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-    elif data == "hesaplarim":
-        await show_accounts_screen(query, session)
-
-    elif data == "hesap_ekle":
-        if len(session["accounts"]) < session["slot_limit"]:
-            session["login_state"] = "awaiting_phone"
-            await query.edit_message_text(
-                text="📱 **Telegram Hesabı Bağlama (Adım 1/2)**\n\n"
-                     "Lütfen eklemek istediğiniz Telegram numaranızı başında ülke kodu ile birlikte gönderin (Örnek: `+905551234567`).",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ İptal", callback_data="hesaplarim")]])
-            )
-        else:
-            await query.answer("⚠️ Slot limitiniz doldu! En fazla 3 numara ekleyebilirsiniz.", show_alert=True)
-            await show_accounts_screen(query, session)
-
-    elif data == "hesap_sil":
-        if session["accounts"]:
-            session["accounts"].pop()
-            await query.answer("Hesap sistemden silindi.", show_alert=True)
-        else:
-            await query.answer("Silinecek hesap yok.", show_alert=True)
-        await show_accounts_screen(query, session)
-
-    elif data == "hesap_baslat":
-        if session["accounts"]:
-            session["accounts"][0]["status"] = "Aktif"
-            await query.answer("🚀 Otomasyon başlatıldı! Numaralar Kayıtlı Mesajlar'daki metni gruplara atıyor.", show_alert=True)
-        else:
-            await query.answer("Önce numara ekleyip hesaba giriş yapmalısınız!", show_alert=True)
-        await show_accounts_screen(query, session)
-
-    elif data == "durdur_islem":
-        if session["accounts"]:
-            session["accounts"][0]["status"] = "Durduruldu"
-            await query.answer("İşlem durduruldu.", show_alert=True)
-        await show_accounts_screen(query, session)
-
-    elif data == "tekli_baslat":
-        await query.edit_message_text(
-            text=f"🚀 **Profesyonel Grup Reklam Otomasyonu**\n\n"
-                 f"📌 Sistem, bağladığınız hesapların **Kayıtlı Mesajlar** kısmındaki içeriği okur.\n"
-                 f"🚫 Kanallara asla mesaj atmaz.\n"
-                 f"⚙️ Hariç tuttuğunuz gruplar dışındaki tüm gruplara otomatik reklam basar.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-    elif data == "oto_dm":
-        await query.edit_message_text(
-            text="🤖 **Oto DM Cevap Sistemi**\n\nAktif ve çalışır durumda.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-    elif data == "tavsiye":
-        await query.edit_message_text(
-            text="💡 Tavsiye: Numaralarınızın Kayıtlı Mesajlar klasörüne reklamınızı yazmanız yeterlidir.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-    elif data == "iletisim":
-        await query.edit_message_text(
-            text="📞 **İletişim ve Lisans:**\n\nHer türlü destek, 1 ay - 4 ay veya özel key talebi için **@farketmezda** ile görüşebilirsiniz.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-    elif data == "sss":
-        await query.edit_message_text(
-            text="❓ SSS: Botun reklama başlayabilmesi için hesaba giriş yapması (kod doğrulaması) zorunludur.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
-    text = update.message.text.strip()
-    
-    if text in active_keys:
-        duration, slots = active_keys[text]
-        user_licenses[user_id] = time.time() + duration
-        
-        session = get_user_session(user_id)
-        session["license_key"] = text
-        session["slot_limit"] = slots
-        
-        del active_keys[text]
-        
-        await update.message.reply_text("🎉 **Lisans Başarıyla Aktifleştirildi!** 3 numara slotu tanımlandı. Ana menü için /start yazabilirsiniz.", parse_mode="Markdown")
         return
 
-    if not is_licensed(user_id, username):
-        await update.message.reply_text("❌ Lisansınız yok. Lisans almak için **@farketmezda** ile iletişime geçebilirsiniz.")
+    if action == "settings":
+        settings = database.get_settings(user_id)
+
+        await query.edit_message_text(
+            "⚙️ Reklam ayarları\n\n"
+            f"Mesajlar arası bekleme: {settings['message_interval']} saniye\n"
+            f"Tur sonrası bekleme: {settings['cycle_wait']} saniye\n\n"
+            "Aralıkları değiştirmek için /aralik komutunu kullan."
+        )
         return
 
-    session = get_user_session(user_id)
+    if action == "groups":
+        groups = database.list_allowed_groups(user_id)
 
-    if session.get("login_state") == "awaiting_phone":
-        phone = text
-        session["temp_phone"] = phone
-        
+        if not groups:
+            text = "Henüz izinli grup eklenmemiş."
+        else:
+            text = "🗂 İzinli grupların:\n\n" + "\n".join(
+                f"• {group['chat_id']}" for group in groups
+            )
+
+        await query.edit_message_text(
+            text + "\n\nYeni grup eklemek için /izinli_grup komutunu kullan.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if action == "excluded":
+        groups = database.list_excluded_groups(user_id)
+
+        text = (
+            "🚫 Hariç tutulan gruplar:\n\n"
+            + ("\n".join(groups) if groups else "Liste boş.")
+        )
+
+        await query.edit_message_text(text, reply_markup=main_menu())
+        return
+
+    if action == "accounts":
+        await query.edit_message_text(
+            "👥 Hesap yönetimi\n\n"
+            "Çoklu hesap bağlantısı henüz etkin değil. "
+            "Güvenli oturum kaydı tamamlandığında burada görünecek.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if action == "ads":
+        await query.edit_message_text(
+            "📢 Reklam yönetimi\n\n"
+            "Otomatik gönderim henüz etkin değil.\n"
+            "Yalnızca yönettiğin veya açık reklam izni aldığın gruplar "
+            "için gönderim desteği hazırlanacaktır.",
+            reply_markup=main_menu(),
+        )
+        return
+
+
+async def text_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user_id = update.effective_user.id
+    state = context.user_data.get("state")
+    message = update.message.text.strip()
+
+    if state == "key_duration":
+        if not is_admin(user_id):
+            context.user_data.clear()
+            return
+
         try:
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
-            await client.connect()
-            sent = await client.send_code_request(phone)
-            
-            session["temp_client"] = client
-            session["temp_hash"] = sent.phone_code_hash
-            session["login_state"] = "awaiting_code"
-            
+            hours = int(message)
+            if hours < 1 or hours > 87600:
+                raise ValueError
+        except ValueError:
             await update.message.reply_text(
-                f"📩 `{phone}` numarasına Telegram resmi uygulamasından giriş kodu gönderildi!\n\n"
-                f"Lütfen gelen doğrulama kodunu araya boşluk koyarak veya direk bota yazın (Örn: `12345`):",
-                parse_mode="Markdown"
+                "Geçerli bir saat değeri gir. En az 1, en fazla 87600."
             )
-        except Exception as e:
-            session["login_state"] = None
-            await update.message.reply_text(f"❌ Kod gönderilirken hata oluştu: `{str(e)}`\n\nNumaranızı doğru girdiğinizden emin olun ve tekrar deneyin.")
+            return
+
+        context.user_data["key_duration"] = hours
+        context.user_data["state"] = "key_slots"
+
+        await update.message.reply_text(
+            "Bu lisans kaç hesapta kullanılabilsin?\n"
+            "Örnek: 1"
+        )
         return
 
-    if session.get("login_state") == "awaiting_code":
-        code = text.replace(" ", "")
-        client = session.get("temp_client")
-        phone = session.get("temp_phone")
-        phone_code_hash = session.get("temp_hash")
-        
+    if state == "key_slots":
+        if not is_admin(user_id):
+            context.user_data.clear()
+            return
+
         try:
-            await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
-            session_string = client.session.save()
-            
-            new_acc = {
-                "phone": phone,
-                "session_string": session_string,
-                "status": "Aktif"
-            }
-            session["accounts"].append(new_acc)
-            
-            session["login_state"] = None
-            session.pop("temp_phone", None)
-            session.pop("temp_client", None)
-            session.pop("temp_hash", None)
-            
+            slots = int(message)
+            if slots < 1 or slots > 20:
+                raise ValueError
+        except ValueError:
             await update.message.reply_text(
-                "✅ **Tebrikler! Hesaba Başarıyla Giriş Yapıldı ve Oturum Açıldı.**\n\n"
-                "Bot artık bu hesabın *Kayıtlı Mesajlar* içeriğini okumaya ve kanallar hariç tüm gruplara otomatik reklam basmaya hazırdır! Ana menü için /start yazabilirsiniz.",
-                parse_mode="Markdown"
+                "Hesap sayısı 1 ile 20 arasında olmalı."
             )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Giriş yapılırken hata oluştu (Şifreli hesap/2FA olabilir): `{str(e)}`\n\nLütfen tekrar 'Hesap Ekle' butonundan deneyin.")
-            session["login_state"] = None
+            return
+
+        hours = context.user_data.get("key_duration")
+        key = secrets.token_urlsafe(18)
+
+        try:
+            database.create_license(key, hours, slots)
+        except Exception:
+            logger.exception("Lisans oluşturulamadı.")
+            await update.message.reply_text("Lisans oluşturulurken hata oluştu.")
+            context.user_data.clear()
+            return
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "✅ Lisans oluşturuldu.\n\n"
+            f"Süre: {hours} saat\n"
+            f"Hesap limiti: {slots}\n\n"
+            f"Anahtar: `{key}`",
+            parse_mode="Markdown",
+        )
         return
 
-    session["excluded_groups"].append(text)
+    if state == "redeem_key":
+        success = database.activate_license(message, user_id)
+        context.user_data.clear()
+
+        if success:
+            await update.message.reply_text(
+                "✅ Lisans başarıyla etkinleştirildi.",
+                reply_markup=main_menu(),
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Anahtar geçersiz, süresi dolmuş veya kullanılmış.",
+                reply_markup=main_menu(),
+            )
+        return
+
+    if state == "interval":
+        try:
+            seconds = int(message)
+            if seconds < 10 or seconds > 86400:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "10 ile 86400 arasında saniye gir."
+            )
+            return
+
+        settings = database.get_settings(user_id)
+        database.save_settings(
+            user_id,
+            seconds,
+            settings["cycle_wait"],
+        )
+        context.user_data.clear()
+
+        await update.message.reply_text("✅ Mesaj aralığı kaydedildi.")
+        return
+
+    if state == "cycle_wait":
+        try:
+            seconds = int(message)
+            if seconds < 60 or seconds > 604800:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "60 ile 604800 arasında saniye gir."
+            )
+            return
+
+        settings = database.get_settings(user_id)
+        database.save_settings(
+            user_id,
+            settings["message_interval"],
+            seconds,
+        )
+        context.user_data.clear()
+
+        await update.message.reply_text("✅ Tur sonrası bekleme kaydedildi.")
+        return
+
+    if state == "group_id":
+        if not database.license_is_valid(user_id):
+            context.user_data.clear()
+            await update.message.reply_text("Aktif lisansın bulunmuyor.")
+            return
+
+        chat_id = message
+        if len(chat_id) > 100:
+            await update.message.reply_text("Grup bilgisi çok uzun.")
+            return
+
+        context.user_data["group_id"] = chat_id
+        context.user_data["state"] = "group_consent"
+
+        await update.message.reply_text(
+            "Bu grupta reklam paylaşmak için açık iznin var mı?\n\n"
+            "İzin kaydını açıklayan kısa bir not gönder. "
+            "Örnek: Grup yöneticisinden alınan reklam izni."
+        )
+        return
+
+    if state == "group_consent":
+        chat_id = context.user_data.get("group_id")
+
+        if not chat_id:
+            context.user_data.clear()
+            await update.message.reply_text("İşlem iptal edildi.")
+            return
+
+        database.add_allowed_group(
+            user_id,
+            chat_id,
+            consent_note=message[:500],
+        )
+
+        context.user_data.clear()
+        await update.message.reply_text(
+            "✅ Grup izinli listene eklendi."
+        )
+        return
+
     await update.message.reply_text(
-        f"🚫 **Grup Hariç Tutma Listesine Eklendi:**\n`{text}`\n\n"
-        f"💡 Bu grup bundan sonraki otomatik gönderimlerde atlanacaktır. Ana menü için /start yazabilirsiniz.",
-        parse_mode="Markdown"
+        "Komutları kullanabilir veya menüden seçim yapabilirsin."
     )
 
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).read_timeout(30).write_timeout(30).connect_timeout(30).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    
-    print("Gerçek Telethon Oturumlu Profesyonel Bot Aktif!")
-    app.run_polling()
+
+async def set_interval(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not database.license_is_valid(update.effective_user.id):
+        await update.message.reply_text("Aktif lisansın bulunmuyor.")
+        return
+
+    context.user_data["state"] = "interval"
+    await update.message.reply_text(
+        "Mesajlar arasında kaç saniye beklensin?\n"
+        "10 - 86400"
+    )
+
+
+async def set_cycle_wait(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not database.license_is_valid(update.effective_user.id):
+        await update.message.reply_text("Aktif lisansın bulunmuyor.")
+        return
+
+    context.user_data["state"] = "cycle_wait"
+    await update.message.reply_text(
+        "Tüm izinli gruplar tamamlandıktan sonra kaç saniye beklensin?\n"
+        "60 - 604800"
+    )
+
+
+async def add_group(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not database.license_is_valid(update.effective_user.id):
+        await update.message.reply_text("Aktif lisansın bulunmuyor.")
+        return
+
+    context.user_data["state"] = "group_id"
+    await update.message.reply_text(
+        "İzin aldığın grubun Telegram grup ID'sini gönder:"
+    )
+
+
+async def cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    context.user_data.clear()
+    await update.message.reply_text("İşlem iptal edildi.")
+
+
+def main():
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("id", my_id))
+    application.add_handler(CommandHandler("aralik", set_interval))
+    application.add_handler(CommandHandler("tur_bekleme", set_cycle_wait))
+    application.add_handler(CommandHandler("izinli_grup", add_group))
+    application.add_handler(CommandHandler("iptal", cancel))
+
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
+    )
+
+    logger.info("FARKETMEZ PANEL başlatılıyor.")
+    application.run_polling()
+
+
+if __name__ == "__main__":
+    main()
