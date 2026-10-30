@@ -499,3 +499,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+telegram_userbot_manager/
+│
+├── bot.py
+├── database.py
+├── userbot_manager.py
+├── requirements.txt
+├── .env.example
+├── .gitignore
+│
+└── sessions/
