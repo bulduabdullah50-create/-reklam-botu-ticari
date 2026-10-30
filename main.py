@@ -7,9 +7,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     token = os.getenv("BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
-
+    app = ApplicationBuilder().token(token).read_timeout(30).write_timeout(30).connect_timeout(30).build()
+    
     app.add_handler(CommandHandler("start", start))
-
+    
     print("Bot aktif!")
     app.run_polling()
