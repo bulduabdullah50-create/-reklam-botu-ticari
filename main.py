@@ -1,44 +1,39 @@
 import os
 import time
+import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
-# Ana Yönetici (Sadece bu hesap key üretebilir)
 ADMIN_USERNAME = "farketmezda"
 
-# Üretilen key'lerin ve kullanıcıların sürelerinin tutulduğu veritabanı simülasyonu
-# Format: { "KEY123": süre_saniye }
+# Aktif lisans keyleri ve süreleri (Saniye cinsinden)
 active_keys = {
-    "HARUN-1GUN": 86400,       # 1 Gün (Saniye cinsinden)
-    "HARUN-1AY": 2592000,      # 30 Gün
-    "HARUN-2AY": 5184000       # 60 Gün
+    "DP6W1TR5MS5": 345600, 
+    "HARUN-1AY": 2592000,
+    "HARUN-2AY": 5184000
 }
 
-# Kullanıcı oturumları ve bitiş süreleri: { user_id: bitis_zaman_damgasi }
-user_licenses = {}
+user_licenses = {} 
 user_sessions = {}
 
 def get_user_session(user_id):
     if user_id not in user_sessions:
         user_sessions[user_id] = {
-            "active_bot": False,
-            "connected_accounts": [],
-            "saved_message": "Henüz mesaj kaydedilmedi.",
-            "interval": "10 saniye"
+            "license_key": "Yok",
+            "slot_limit": 3, # Her key en fazla 3 numara ekleyebilir
+            "accounts": [],  # Her hesabın kendi reklam metni ve durumu ayrı tutulur
+            "interval": "10 saniye",
+            "excluded_groups": []
         }
     return user_sessions[user_id]
 
-# Lisans Kontrol Fonksiyonu
 def is_licensed(user_id, username):
     if username and username.lower() == ADMIN_USERNAME.lower():
         return True
-    
-    # Süresi bitmiş mi kontrol et
     if user_id in user_licenses:
         if time.time() < user_licenses[user_id]:
             return True
         else:
-            # Süresi dolmuşsa sil
             del user_licenses[user_id]
     return False
 
@@ -53,38 +48,31 @@ async def send_main_menu(update_or_query, text_title="👋 **Oto Mesaj ve Otomas
     
     if not licensed:
         keyboard = [
-            [InlineKeyboardButton("🔑 Key (Lisans) Aktif Et", callback_data="key_gir")],
+            [InlineKeyboardButton("🔑 Key Aktif Et", callback_data="key_gir")],
             [InlineKeyboardButton("🛡️ Lisans Bilgim", callback_data="lisans_bilgi")],
-            [InlineKeyboardButton("📞 İletişim / Key Al", callback_data="iletisim")],
+            [InlineKeyboardButton("📞 İletişim", callback_data="iletisim")],
             [InlineKeyboardButton("🏠 Ana Menü", callback_data="ana_menu")]
         ]
-        text = (
-            f"{text_title}\n\n"
-            "❌ **Aktif Lisansınız Bulunmuyor!**\n\n"
-            "🔒 Botu kullanabilmek için @farketmezda adresinden temin edeceğiniz lisans anahtarını **'Key Aktif Et'** butonuna basarak girmeniz gerekmektedir."
-        )
+        text = f"{text_title}\n\n❌ **Aktif Lisansınız Bulunmuyor!**\n\nLisans almak için **@farketmezda** ile iletişime geçebilirsiniz."
     else:
         keyboard = [
-            [InlineKeyboardButton("🚀 Tekli Botu Başlat", callback_data="tekli_baslat"),
+            [InlineKeyboardButton("🚀 Reklam Botunu Başlat", callback_data="tekli_baslat"),
              InlineKeyboardButton("🤖 Sadece Oto DM Cevap", callback_data="oto_dm")],
-            [InlineKeyboardButton("👥 Hesaplarım", callback_data="hesaplarim"),
-             InlineKeyboardButton("🛡️ Lisans Bilgim", callback_data="lisans_bilgi")],
+            [InlineKeyboardButton("👥 Hesaplarım & Reklamlarım", callback_data="hesaplarim"),
+             InlineKeyboardButton("🚫 Hariç Tutulan Gruplar", callback_data="haric_gruplar_menu")],
+            [InlineKeyboardButton("🛡️ Lisans Bilgim", callback_data="lisans_bilgi")],
         ]
+        
         if is_admin:
-            keyboard.append([InlineKeyboardButton("👑 Yönetici Key Üretim Paneli", callback_data="admin_panel")])
+            keyboard.append([InlineKeyboardButton("👑 Sınırsız Key Üretim Paneli", callback_data="admin_panel")])
             
         keyboard.extend([
             [InlineKeyboardButton("💡 Tavsiye", callback_data="tavsiye"),
              InlineKeyboardButton("📞 İletişim", callback_data="iletisim")],
             [InlineKeyboardButton("❓ Sık Sorulan Sorular", callback_data="sss")],
-            [InlineKeyboardButton("💬 Destek", url="https://t.me/farketmezda")],
             [InlineKeyboardButton("🏠 Ana Menü", callback_data="ana_menu")]
         ])
-        text = (
-            f"{text_title}\n\n"
-            "✅ **Lisansınız Onaylı ve Aktif!**\n\n"
-            "💡 Aşağıdaki butonlardan işlemlerinizi yönetebilirsiniz."
-        )
+        text = f"{text_title}\n\n✅ **Sistem Aktif. Her hesap tamamen kendi reklamını bağımsız yürütür.**"
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -96,13 +84,14 @@ async def send_main_menu(update_or_query, text_title="👋 **Oto Mesaj ve Otomas
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_main_menu(update)
 
-# Buton ve İşlem Yönlendiricisi
+# Buton ve Panel Yöneticisi
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = query.from_user.id
-    username = query.from_user.username
+    user = query.from_user
+    user_id = user.id
+    username = user.username
     licensed = is_licensed(user_id, username)
     session = get_user_session(user_id)
     data = query.data
@@ -112,14 +101,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not licensed and data not in ["iletisim", "sss", "lisans_bilgi", "key_gir"]:
-        await query.answer("❌ Bu işlem için geçerli bir lisans anahtarı girmeniz gerekir!", show_alert=True)
-        await send_main_menu(query, text_title="⚠️ **Kısıtlı Erişim**")
+        await query.answer("❌ Bu işlem için lisans gereklidir!", show_alert=True)
         return
 
     if data == "key_gir":
         await query.edit_message_text(
-            text="🔑 **Lisans Key Aktifleştirme**\n\n"
-                 "Lütfen @farketmezda'dan aldığınız lisans anahtarını doğrudan bu sohbete **mesaj olarak** gönderin.",
+            text="🔑 **Lisans Key Aktifleştirme**\n\nLütfen @farketmezda'dan aldığınız anahtarı doğrudan bu sohbete mesaj olarak yazın.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
         )
 
@@ -128,192 +115,210 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [
                 [InlineKeyboardButton("➕ 1 Günlük Key Üret", callback_data="gen_1gun"),
                  InlineKeyboardButton("➕ 1 Aylık Key Üret", callback_data="gen_1ay")],
-                [InlineKeyboardButton("➕ 2 Aylık Key Üret", callback_data="gen_2ay")],
+                [InlineKeyboardButton("➕ 2 Aylık Key Üret", callback_data="gen_2ay"),
+                 InlineKeyboardButton("➕ Sınırsız / 1 Yıllık Key Üret", callback_data="gen_sinirsiz")],
                 [InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]
             ]
             await query.edit_message_text(
-                text="👑 **Yönetici Key Üretim Paneli**\n\n"
-                     "Aşağıdaki butonlara basarak anında yeni lisans anahtarları oluşturabilirsiniz:",
+                text="👑 **Sınırsız Key Üretim Paneli (@farketmezda)**",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
         else:
-            await query.answer("Bu panele sadece @farketmezda erişebilir!", show_alert=True)
+            await query.answer("❌ Bu alana sadece yönetici erişebilir!", show_alert=True)
 
     elif data.startswith("gen_"):
         if username and username.lower() == ADMIN_USERNAME.lower():
-            import random
             rand_code = ''.join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=6))
-            
             if data == "gen_1gun":
                 key_name = f"BKMZ-1GUN-{rand_code}"
                 active_keys[key_name] = 86400
-                süre_str = "1 Günlük"
             elif data == "gen_1ay":
                 key_name = f"BKMZ-1AY-{rand_code}"
                 active_keys[key_name] = 2592000
-                süre_str = "1 Aylık"
             elif data == "gen_2ay":
                 key_name = f"BKMZ-2AY-{rand_code}"
                 active_keys[key_name] = 5184000
-                süre_str = "2 Aylık"
+            else:
+                key_name = f"BKMZ-PRO-{rand_code}"
+                active_keys[key_name] = 31536000
                 
             await query.edit_message_text(
-                text=f"✅ **Yeni {süre_str} Key Başarıyla Üretildi!**\n\n"
-                     f"🔑 Anahtar Kodunuz:\n`{key_name}`\n\n"
-                     f"Bu kodu kullanıcıya ileterek aktif etmesini sağlayabilirsiniz.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Yönetici Paneline Dön", callback_data="admin_panel")]]),
-                parse_mode="Markdown"
+                text=f"✅ **Key Başarıyla Üretildi!**\n\n🔑 Kod:\n`{key_name}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Yönetici Paneline Dön", callback_data="admin_panel")]])
             )
 
-    elif data == "tekli_baslat":
-        status_text = "🟢 Aktif (Çalışıyor)" if session["active_bot"] else "🔴 Durduruldu"
+    elif data == "haric_gruplar_menu":
+        ex_list = "\n".join([f"• {g}" for g in session["excluded_groups"]]) if session["excluded_groups"] else "• Hariç tutulan grup yok."
         keyboard = [
-            [InlineKeyboardButton("▶️ Başlat / Durdur Değiştir", callback_data="toggle_bot")],
-            [InlineKeyboardButton("⏱️ Gönderim Süresini Ayarla", callback_data="set_interval")],
+            [InlineKeyboardButton("🗑️ Listeyi Temizle", callback_data="grup_temizle_haric")],
             [InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]
         ]
         await query.edit_message_text(
-            text=f"🚀 **Tekli Bot Başlatma Paneli**\n\n"
-                 f"• Durum: {status_text}\n"
-                 f"• Süre Aralığı: {session['interval']}\n"
-                 f"• Kayıtlı Mesaj:\n`{session['saved_message']}`",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-        
-    elif data == "toggle_bot":
-        session["active_bot"] = not session["active_bot"]
-        status_text = "🟢 Aktif Edildi!" if session["active_bot"] else "🔴 Durduruldu!"
-        await query.answer(status_text, show_alert=True)
-        
-        curr_status = "🟢 Aktif (Çalışıyor)" if session["active_bot"] else "🔴 Durduruldu"
-        keyboard = [
-            [InlineKeyboardButton("▶️ Başlat / Durdur Değiştir", callback_data="toggle_bot")],
-            [InlineKeyboardButton("⏱️ Gönderim Süresini Ayarla", callback_data="set_interval")],
-            [InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]
-        ]
-        await query.edit_message_text(
-            text=f"🚀 **Tekli Bot Başlatma Paneli**\n\n"
-                 f"• Durum: {curr_status}\n"
-                 f"• Süre Aralığı: {session['interval']}\n"
-                 f"• Kayıtlı Mesaj:\n`{session['saved_message']}`",
+            text=f"🚫 **Mesaj Gitmeyecek Hariç Tutulan Gruplar**\n\n{ex_list}\n\nİstemediğiniz grubun adını bota yazarak bu listeye ekleyebilirsiniz.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
 
-    elif data == "set_interval":
-        keyboard = [
-            [InlineKeyboardButton("5 Saniye", callback_data="int_5"), InlineKeyboardButton("10 Saniye", callback_data="int_10")],
-            [InlineKeyboardButton("30 Saniye", callback_data="int_30"), InlineKeyboardButton("1 Dakika", callback_data="int_60")],
-            [InlineKeyboardButton("🔙 Geri Dön", callback_data="tekli_baslat")]
-        ]
-        await query.edit_message_text(
-            text="⏱️ **Gönderim Süresi Seçimi**\n\nSüre aralığını seçin:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+    elif data == "grup_temizle_haric":
+        session["excluded_groups"] = []
+        await query.answer("Liste temizlendi.", show_alert=True)
+        await button_handler(update, context)
 
-    elif data.startswith("int_"):
-        val = data.split("_")[1]
-        session["interval"] = "1 Dakika" if val == "60" else f"{val} saniye"
-        await query.answer(f"Süre {session['interval']} yapıldı!", show_alert=True)
-        
-        status_text = "🟢 Aktif (Çalışıyor)" if session["active_bot"] else "🔴 Durduruldu"
-        keyboard = [
-            [InlineKeyboardButton("▶️ Başlat / Durdur Değiştir", callback_data="toggle_bot")],
-            [InlineKeyboardButton("⏱️ Gönderim Süresini Ayarla", callback_data="set_interval")],
-            [InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]
-        ]
-        await query.edit_message_text(
-            text=f"🚀 **Tekli Bot Başlatma Paneli**\n\n"
-                 f"• Durum: {status_text}\n"
-                 f"• Süre Aralığı: {session['interval']}\n"
-                 f"• Kayıtlı Mesaj:\n`{session['saved_message']}`",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-        
-    elif data == "oto_dm":
-        await query.edit_message_text(
-            text="🤖 **Oto DM Cevap Sistemi**\n\nAktif ve çalışır durumda.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-        
-    elif data == "hesaplarim":
-        await query.edit_message_text(
-            text="👥 **Bağlı Hesaplarım**\n\nOturumunuza bağlı hesap bulunmuyor.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-        
     elif data == "lisans_bilgi":
-        keyboard = [[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]]
         if username and username.lower() == ADMIN_USERNAME.lower():
-            text = "🛡️ **Lisans Durumunuz:** Ana Yönetici (@farketmezda) - Sınırsız Yetki"
+            text = (
+                f"🔑 **Aktif lisans sayısı:** {len(user_licenses) + 1}\n"
+                f"💻 **Aktif mesaj gönderen sayısı:** {len(user_sessions)}\n\n"
+                f"🔒 **Lisans Bilgilerin**\n\n"
+                f"👤 **Müşteri Adı:** {user.first_name} (Yönetici)\n"
+                f"🔑 **Lisans Anahtarı:** SINIRSIZ-ADMIN\n"
+                f"⏳ **Kalan Süre:** Sınırsız\n"
+                f"👥 **Kullanıcı Limiti (Slot):** 3 Numara\n"
+                f"⚙️ **Durum:** 🟢 Aktif\n\n"
+                f"✉️ Lisans almak veya süreni uzatmak için **@farketmezda** ile iletişime geçebilirsin."
+            )
         else:
             if user_id in user_licenses:
                 kalan_saniye = int(user_licenses[user_id] - time.time())
                 gün = kalan_saniye // 86400
-                s_text = f"Aktif ({gün} gün kaldı)" if gün > 0 else f"Aktif ({kalan_saniye // 3600} saat kaldı)"
+                saat = (kalan_saniye % 86400) // 3600
+                kalan_str = f"{gün} gün {saat} saat" if kalan_saniye > 0 else "Süre Doldu"
+                bitis_zamani = time.strftime('%Y-%m-%d', time.localtime(user_licenses[user_id]))
+                durum_str = "🟢 Aktif" if kalan_saniye > 0 else "🔴 Durdurulmuş"
             else:
-                s_text = "Lisans Yok"
-            text = f"🛡️ **Lisans Durumunuz:** {s_text}\n\nKey aktif etmek için ana menüden 'Key Aktif Et' butonunu kullanabilirsiniz."
+                kalan_str = "0 gün"
+                bitis_zamani = "Yok"
+                durum_str = "🔴 Durdurulmuş"
+
+            text = (
+                f"🔒 **Lisans Bilgilerin**\n\n"
+                f"👤 **Müşteri Adı:** {user.first_name}\n"
+                f"🔑 **Lisans Anahtarı:** {session['license_key']}\n"
+                f"⏳ **Kalan Süre:** {kalan_str}\n"
+                f"👥 **Kullanıcı Limiti (Slot):** {session['slot_limit']} Numara\n"
+                f"⚙️ **Durum:** {durum_str}\n\n"
+                f"✉️ Lisans almak veya süreni uzatmak için **@farketmezda** ile iletişime geçebilirsin."
+            )
+
+        keyboard = [[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]]
         await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    elif data == "tavsiye":
+    elif data == "hesaplarim":
+        acc_text = ""
+        if session["accounts"]:
+            for idx, acc in enumerate(session["accounts"], 1):
+                st = "🟢 Çalışıyor" if acc["status"] else "🔴 Durduruldu"
+                acc_text += f"{idx}) 🆔 `{acc['id']}`\n📌 Reklamı: *{acc['ad_message']}*\n{st} | 📞 `{acc['phone']}`\n\n"
+        else:
+            acc_text = "• Henüz eklenmiş hesap yok.\n\n"
+
+        keyboard = [
+            [InlineKeyboardButton("➕ Hesap Ekle", callback_data="hesap_ekle"),
+             InlineKeyboardButton("🗑️ Hesap Sil", callback_data="hesap_sil")],
+            [InlineKeyboardButton("▶️ Başlat", callback_data="hesap_baslat"),
+             InlineKeyboardButton("🔴 Durdur", callback_data="durdur_islem")],
+            [InlineKeyboardButton("🏠 Ana Menü", callback_data="ana_menu")]
+        ]
         await query.edit_message_text(
-            text="💡 **Tavsiye:** Süre aralıklarını dengeli tutun.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-        
-    elif data == "iletisim":
-        await query.edit_message_text(
-            text="📞 **İletişim ve Key Satın Al:**\n\n• @farketmezda",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
-        )
-        
-    elif data == "sss":
-        await query.edit_message_text(
-            text="❓ **SSS:** Key'leri @farketmezda üzerinden temin edebilirsiniz.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+            text=f"👥 **Bağlı Hesaplarınız ve Size Özel Reklamlarınız**\n\n"
+                 f"📦 Slot: {len(session['accounts'])} / {session['slot_limit']}\n\n"
+                 f"{acc_text}"
+                 f"💡 Her hesap kendi özel reklam metniyle gruplara otomatik gönderim yapar.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
 
-# Mesaj Yakalama & Key Kontrol Mekanizması
+    elif data == "hesap_ekle":
+        if len(session["accounts"]) < session["slot_limit"]:
+            # Her yeni hesaba varsayılan bir reklam metni atanır, kullanıcı bunu değiştirebilir
+            new_acc = {
+                "id": str(random.randint(100000, 999999)), 
+                "phone": f"905{random.randint(100000000,999999999)}", 
+                "status": False,
+                "ad_message": "Henüz reklam metni girilmedi (Bota yazarak değiştirebilirsiniz)."
+            }
+            session["accounts"].append(new_acc)
+            await query.answer("Yeni hesap slotu eklendi!", show_alert=True)
+        else:
+            await query.answer("⚠️ Max 3 numara ekleyebilirsiniz!", show_alert=True)
+        await button_handler(update, context)
+
+    elif data == "hesap_sil":
+        if session["accounts"]:
+            session["accounts"].pop()
+            await query.answer("Hesap silindi.", show_alert=True)
+        else:
+            await query.answer("Silinecek hesap yok.", show_alert=True)
+        await button_handler(update, context)
+
+    elif data == "hesap_baslat":
+        if session["accounts"]:
+            session["accounts"][0]["status"] = True
+            await query.answer("Bu hesaba ait reklam botu başlatıldı!", show_alert=True)
+        else:
+            await query.answer("Önce hesap ekleyin!", show_alert=True)
+        await button_handler(update, context)
+
+    elif data == "durdur_islem":
+        if session["accounts"]:
+            session["accounts"][0]["status"] = False
+            await query.answer("Hesap durduruldu.", show_alert=True)
+        await button_handler(update, context)
+
+    elif data == "tekli_baslat":
+        active_ads = "\n".join([f"• Hesap {idx}: *{acc['ad_message']}* ({'Çalışıyor' if acc['status'] else 'Durduruldu'})" for idx, acc in enumerate(session["accounts"], 1)]) if session["accounts"] else "• Aktif hesap yok."
+        await query.edit_message_text(
+            text=f"🚀 **Bağımsız Reklam Gönderim Paneli**\n\n"
+                 f"Sisteme tanımlı hesaplarınızın reklam durumları:\n{active_ads}\n\n"
+                 f"✏️ Yeni bir reklam metni kaydetmek için doğrudan bu sohbete mesajınızı yazabilirsiniz.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]])
+        )
+    elif data == "oto_dm":
+        await query.edit_message_text(text="🤖 **Oto DM Cevap**\n\nAktif.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]]))
+    elif data == "tavsiye":
+        await query.edit_message_text(text="💡 Tavsiye: Her hesabın reklam metnini ayrı ayrı belirleyebilirsiniz.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]]))
+    elif data == "iletisim":
+        await query.edit_message_text(text="📞 **İletişim ve Lisans:**\n\n@farketmezda", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]]))
+    elif data == "sss":
+        await query.edit_message_text(text="❓ SSS: Herkes kendi reklamını yapar, diğer hesapları etkilemez.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Geri Dön", callback_data="ana_menu")]]))
+
+# Mesaj Yakalama: Her kullanıcının kendi hesabına özel reklam metni ataması
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.from_user.username
     text = update.message.text.strip()
     
-    # Eğer kullanıcı bir key girdiyse kontrol et
     if text in active_keys:
         duration = active_keys[text]
-        # Eğer kullanıcının zaten süresi varsa üstüne ekle, yoksa baştan başlat
-        current_time = time.time()
-        base_time = user_licenses[user_id] if user_id in user_licenses and user_licenses[user_id] > current_time else current_time
+        user_licenses[user_id] = time.time() + duration
         
-        user_licenses[user_id] = base_time + duration
-        del active_keys[text] # Kullanılan key'i bir daha kullanılmasın diye sil
+        session = get_user_session(user_id)
+        session["license_key"] = text
+        session["slot_limit"] = 3
         
+        del active_keys[text]
+        
+        await update.message.reply_text("🎉 **Lisans Aktifleştirildi!** 3 numara slotu tanımlandı. /start yazabilirsiniz.", parse_mode="Markdown")
+        return
+
+    if not is_licensed(user_id, username):
+        await update.message.reply_text("❌ Lisansınız yok. Lisans için **@farketmezda** ile iletişime geçin.")
+        return
+
+    session = get_user_session(user_id)
+    
+    # Kullanıcının ekli hesabı varsa, yazdığı metni o hesaba özel reklam metni yapalım
+    if session["accounts"]:
+        session["accounts"][0]["ad_message"] = text
         await update.message.reply_text(
-            "🎉 **Tebrikler! Lisans Anahtarı Başarıyla Aktifleştirildi.**\n\n"
-            "Botun tüm özellikleri hesabınız için açıldı. Ana menüye dönmek için /start yazabilirsiniz.",
+            f"✅ **Bu Hesaba Özel Reklam Metni Güncellendi!**\n\n"
+            f"📝 Metin: `{text}`\n\n"
+            f"💡 Bu reklam sadece sizin hesaplarınız üzerinden kanallar hariç gruplara gönderilecektir. Diğer kullanıcıların reklamlarıyla asla karışmaz.",
             parse_mode="Markdown"
         )
-        return
-
-    # Normal lisans kontrolü
-    if not is_licensed(user_id, username):
-        await update.message.reply_text("❌ Geçerli bir lisansınız yok. Lütfen @farketmezda hesabından 1 günlük, 1 aylık veya 2 aylık key alıp bota gönderin.")
-        return
-
-    # Mesaj kaydetme
-    session = get_user_session(user_id)
-    session["saved_message"] = text
-    
-    await update.message.reply_text(
-        f"✅ **Mesajınız Kaydedildi!**\n\nİçerik: `{text}`\n\nAna menüye dönmek için /start yazabilirsiniz.",
-        parse_mode="Markdown"
-    )
+    else:
+        await update.message.reply_text("⚠️ Önce 'Hesaplarım' menüsünden bir hesap ekleyin, ardından reklam metninizi yazın.")
 
 if __name__ == '__main__':
     token = os.getenv("BOT_TOKEN")
@@ -323,5 +328,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("Süreli Key Sistemli Bot Aktif!")
+    print("İzole Edilmiş Çoklu Hesap Reklam Botu Aktif!")
     app.run_polling()
