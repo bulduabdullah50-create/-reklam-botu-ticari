@@ -1,12 +1,15 @@
 import os
-from telethon import TelegramClient
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 
-# Render'a girdiğin BOT_TOKEN'ı direkt okur
-bot_token = os.getenv("BOT_TOKEN")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Bot aktif ve çalışıyor!')
 
-# Telethon'u sadece bot token ile başlatıyoruz
-client = TelegramClient('bot', 38225321, '48499b759e2281784608038c660df2d').start(bot_token=bot_token)
+if __name__ == '__main__':
+    token = os.getenv("BOT_TOKEN")
+    app = ApplicationBuilder().token(token).build()
 
-print("Bot aktif!")
-client.run_until_disconnected()
+    app.add_handler(CommandHandler("start", start))
 
+    print("Bot aktif!")
+    app.run_polling()
