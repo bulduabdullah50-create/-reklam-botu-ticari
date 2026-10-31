@@ -39,8 +39,9 @@ SESSIONS.mkdir(parents=True, exist_ok=True)
 clients = {}
 pending = {}
 tasks = {}
-blacklisted_groups = {}
-tur_detaylari = {}  # Hangi hesap hangi grupta ne yapmış tutmak için
+blacklisted_groups = {}  # Genel Karaliste
+account_blacklists = {}  # Hesaba Özel Karaliste (session_name -> set)
+tur_detaylari = {}
 
 
 def is_admin(uid):
@@ -59,7 +60,7 @@ def get_keyboard(uid):
         ],
         [
             InlineKeyboardButton("📩 Reklam Seç", callback_data="ad"),
-            InlineKeyboardButton("🚫 Grup Engel", callback_data="blacklist"),
+            InlineKeyboardButton("🚫 Genel Grup Engel", callback_data="blacklist"),
         ],
         [
             InlineKeyboardButton("⏱ Grup Aralığı", callback_data="time_group"),
@@ -261,7 +262,6 @@ async def sender_loop(uid, session_name, context, chat_id):
                         is_chan = getattr(entity, 'broadcast', False)
                         is_grp = getattr(entity, 'megagroup', False) or d.is_group
                         
-                        # Kullanıcı ayarına göre kanal veya grupları dahil etme seçeneği
                         include_groups = user.get("inc_groups", 1)
                         include_channels = user.get("inc_channels", 1)
 
@@ -283,6 +283,7 @@ async def sender_loop(uid, session_name, context, chat_id):
                 continue
 
             user_bl = blacklisted_groups.get(uid, set())
+            acc_bl = account_blacklists.get(session_name, set())
             
             loop_interval = user.get("loop_interval_seconds", 240) if user else 240
             group_interval = user.get("interval_seconds", 3) if user else 3
@@ -292,7 +293,6 @@ async def sender_loop(uid, session_name, context, chat_id):
             skipped_count = 0
             detay_listesi = []
 
-            # Tur Başlangıç Bildirimi (Sohbeti şişirmez, tek mesaj)
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -311,7 +311,8 @@ async def sender_loop(uid, session_name, context, chat_id):
                 g_username = f"@{entity.username}".lower() if entity and getattr(entity, 'username', None) else ""
                 g_title = getattr(group, 'name', 'İsimsiz Grup')
 
-                if g_id in user_bl or (g_username and g_username in user_bl):
+                # Hem Genel Hem de Numaraya Özel Karaliste Kontrolü
+                if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl or (g_username and g_username in acc_bl):
                     skipped_count += 1
                     detay_listesi.append(f"🚫 Engellendi/Atlandı: {g_title}")
                     continue
@@ -332,10 +333,8 @@ async def sender_loop(uid, session_name, context, chat_id):
                 if group_interval > 0:
                     await asyncio.sleep(group_interval)
 
-            # Detayları hafızaya kaydediyoruz (Butonla istenince bakılacak)
             tur_detaylari[session_name] = detay_listesi
 
-            # Tur Bitti Raporu ve Detay Butonu
             try:
                 report_kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("📋 Detaylı Raporu Gör", callback_data=f"report_{session_name}")]
@@ -444,6 +443,8 @@ async def button(update, context):
         user = db.get_user(uid) or {}
         inc_g = user.get("inc_groups", 1)
         inc_c = user.get("inc_channels", 1)
+        
+        acc_bl = account_blacklists.get(session_name, set())
 
         kb = InlineKeyboardMarkup([
             [
@@ -455,6 +456,9 @@ async def button(update, context):
                 InlineKeyboardButton(f"📢 Kanallar: {'✅' if inc_c else '❌'}", callback_data=f"toggle_c_{session_name}")
             ],
             [
+                InlineKeyboardButton("🚫 Bu Hesaba Özel Grup/Kanal Engelle", callback_data=f"acc_bl_{session_name}")
+            ],
+            [
                 InlineKeyboardButton("❌ Bu Hesabı Sil", callback_data=f"del_{session_name}")
             ],
             [
@@ -462,12 +466,30 @@ async def button(update, context):
             ]
         ])
 
+        bl_info = f"\n🔒 Hesaba Özel Engelli: {len(acc_bl)} adet" if acc_bl else ""
+
         await q.edit_message_text(
             f"📱 **Hesap Yönetimi:** `{phone_num}`\n\n"
-            f"Durum: {status_text}\n"
-            f"*(Aşağıdan grup veya kanallara mesaj gitmesini açıp kapatabilirsin)*",
+            f"Durum: {status_text}{bl_info}\n\n"
+            f"*(Aşağıdan gruba/kanala gönderimi veya bu numaraya özel engelleri yönetebilirsin)*",
             parse_mode="Markdown",
             reply_markup=kb
+        )
+
+    elif action.startswith("acc_bl_"):
+        session_name = action.replace("acc_bl_", "")
+        context.user_data["flow"] = f"acc_blacklist_{session_name}"
+        
+        acc_bl = account_blacklists.get(session_name, set())
+        bl_text = "\n".join(f"• {x}" for x in acc_bl) if acc_bl else "Henüz bu hesaba özel engel yok."
+
+        await q.edit_message_text(
+            f"🚫 **HESABA ÖZEL ENGELLEME** (`{session_name}`)\n\n"
+            "Bu numaranın reklam atmasını istemediğin grubun/kanalın linkini veya kullanıcı adını gönder.\n"
+            "Örnek: @grupadi veya t.me/grupadi\n\n"
+            f"📋 Engellenenler:\n{bl_text}",
+            parse_mode="Markdown",
+            reply_markup=sub_menu_keyboard()
         )
 
     elif action.startswith("toggle_g_"):
@@ -475,14 +497,14 @@ async def button(update, context):
         current = user.get("inc_groups", 1)
         db.set_user(uid, inc_groups=0 if current else 1)
         session_name = action.replace("toggle_g_", "")
-        await button(update, context) # Menüyü yenile
+        await button(update, context)
 
     elif action.startswith("toggle_c_"):
         user = db.get_user(uid) or {}
         current = user.get("inc_channels", 1)
         db.set_user(uid, inc_channels=0 if current else 1)
         session_name = action.replace("toggle_c_", "")
-        await button(update, context) # Menüyü yenile
+        await button(update, context)
 
     elif action.startswith("report_"):
         session_name = action.replace("report_", "")
@@ -585,8 +607,8 @@ async def button(update, context):
         bl_text = "\n".join(f"• {x}" for x in bl_set) if bl_set else "Henüz engel yok."
         
         await q.edit_message_text(
-            "🚫 GRUP ENGELLEME / KARALİSTE\n\n"
-            "Reklam göndermek istemediğin grubun Linkini (t.me/grup) veya Kullanıcı adını (@grup) gönder.\n\n"
+            "🚫 GENEL GRUP ENGELLEME / KARALİSTE\n\n"
+            "Tüm hesaplarda engellemek istediğin grubun Linkini (t.me/grup) veya Kullanıcı adını (@grup) gönder.\n\n"
             f"📋 Engellenenler:\n{bl_text}",
             reply_markup=sub_menu_keyboard()
         )
@@ -686,7 +708,26 @@ async def text_handler(update, context):
     if not flow:
         return
 
-    if flow == "phone":
+    if flow.startswith("acc_blacklist_"):
+        session_name = flow.replace("acc_blacklist_", "")
+        clean_target = text.replace("https://t.me/", "").replace("t.me/", "").strip()
+        if not clean_target.startswith("@") and not clean_target.lstrip("-").isdigit():
+            clean_target = "@" + clean_target
+        clean_target = clean_target.lower()
+
+        if session_name not in account_blacklists:
+            account_blacklists[session_name] = set()
+            
+        account_blacklists[session_name].add(clean_target)
+        context.user_data.clear()
+
+        await update.effective_message.reply_text(
+            f"✅ **{clean_target}** hedefi sadece `{session_name}` hesabı için karalisteye eklendi.",
+            parse_mode="Markdown",
+            reply_markup=get_keyboard(uid)
+        )
+
+    elif flow == "phone":
         if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
             await update.effective_message.reply_text(
                 "Telefon numaranı +ülke koduyla gönder."
@@ -791,7 +832,7 @@ async def text_handler(update, context):
         context.user_data.clear()
         
         await update.effective_message.reply_text(
-            f"✅ **{clean_target}** engellenenler listesine eklendi.",
+            f"✅ **{clean_target}** genel engellenenler listesine eklendi.",
             reply_markup=get_keyboard(uid)
         )
 
