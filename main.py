@@ -1,4 +1,3 @@
-
 import os
 import re
 import asyncio
@@ -53,7 +52,6 @@ def get_keyboard(uid):
         ],
         [
             InlineKeyboardButton("👥 Gruplarım", callback_data="groups"),
-            InlineKeyboardButton("🛡 İzinliler", callback_data="approved"),
         ],
         [
             InlineKeyboardButton("📩 Reklam Seç", callback_data="ad"),
@@ -158,10 +156,19 @@ async def start_sender(uid, message):
         await message.reply_text("Önce Reklam Seç bölümünü kullan.")
         return
 
-    groups = db.groups_for(uid)
+    try:
+        dialogs = await client.get_dialogs()
+        groups = [d for d in dialogs if d.is_group or d.is_supergroup]
+        
+        for g in groups:
+            db.approve_group(uid, g.id, g.title or str(g.id), uid)
+    except Exception:
+        log.exception("Gruplar otomatik senkronize edilirken hata oluştu")
 
-    if not groups:
-        await message.reply_text("İzinli grup bulunamadı.")
+    approved_groups = db.groups_for(uid)
+
+    if not approved_groups:
+        await message.reply_text("Gönderim yapabileceğin grup bulunamadı.")
         return
 
     current = tasks.get(uid)
@@ -174,7 +181,7 @@ async def start_sender(uid, message):
 
     tasks[uid] = asyncio.create_task(sender_loop(uid))
 
-    await message.reply_text("▶ Gönderim başlatıldı.")
+    await message.reply_text("▶ Gönderim başlatıldı. Tüm gruplara mesaj iletilecek.")
 
 
 async def sender_loop(uid):
@@ -211,7 +218,6 @@ async def sender_loop(uid):
                 if not user or not user["enabled"]:
                     break
 
-                # Yalnızca izinli gruplara gönderim.
                 try:
                     await client.forward_messages(
                         entity=group["chat_id"],
@@ -299,27 +305,16 @@ async def button(update, context):
             return
 
         dialogs = await client.get_dialogs()
-        groups = [d for d in dialogs if d.is_group]
+        groups = [d for d in dialogs if d.is_group or d.is_supergroup]
 
-        text = "👥 GRUPLARIN\n\n"
+        for g in groups:
+            db.approve_group(uid, g.id, g.title or str(g.id), uid)
+
+        text = "👥 TÜM GRUPLARIN (Otomatik Eklendi)\n\n"
 
         text += "\n".join(
             f"• {g.name} — {g.id}" for g in groups[:40]
         ) if groups else "Grup bulunamadı."
-
-        await q.edit_message_text(
-            text[:3900],
-            reply_markup=get_keyboard(uid)
-        )
-
-    elif action == "approved":
-        groups = db.groups_for(uid)
-
-        text = "🛡 İZİNLİ GRUPLAR\n\n"
-
-        text += "\n".join(
-            f"• {g['title']} — {g['chat_id']}" for g in groups
-        ) if groups else "İzinli grup bulunamadı."
 
         await q.edit_message_text(
             text[:3900],
@@ -387,7 +382,7 @@ async def button(update, context):
         await q.edit_message_text(
             "📊 DURUM\n\n"
             f"Hesap: {'Bağlı' if connected else 'Bağlı değil'}\n"
-            f"İzinli grup: {len(db.groups_for(uid))}\n"
+            f"Hedef grup: {len(db.groups_for(uid))}\n"
             f"Reklam: {'Seçildi' if user['ad_message_id'] else 'Seçilmedi'}\n"
             f"Aralık: {user['interval_seconds']} saniye\n"
             f"Gönderim: {'Aktif' if user['enabled'] else 'Kapalı'}\n"
@@ -663,70 +658,6 @@ async def admin_command(update, context):
     )
 
 
-async def izin_ver(update, context):
-    chat = update.effective_chat
-    user = update.effective_user
-
-    if chat.type not in ("group", "supergroup"):
-        await update.effective_message.reply_text(
-            "Bu komutu izin verilecek grupta kullan."
-        )
-        return
-
-    member = await context.bot.get_chat_member(chat.id, user.id)
-
-    if member.status not in ("administrator", "creator"):
-        await update.effective_message.reply_text(
-            "Yalnızca grup yöneticisi kullanabilir."
-        )
-        return
-
-    try:
-        target = int(context.args[0])
-    except (IndexError, ValueError):
-        await update.effective_message.reply_text(
-            "Kullanım: /izin_ver KULLANICI_ID"
-        )
-        return
-
-    db.approve_group(
-        target, chat.id, chat.title or str(chat.id), user.id
-    )
-
-    await update.effective_message.reply_text("Grup izni kaydedildi.")
-
-
-async def izin_kaldir(update, context):
-    chat = update.effective_chat
-    user = update.effective_user
-
-    if chat.type not in ("group", "supergroup"):
-        await update.effective_message.reply_text(
-            "Bu komutu grupta kullan."
-        )
-        return
-
-    member = await context.bot.get_chat_member(chat.id, user.id)
-
-    if member.status not in ("administrator", "creator"):
-        await update.effective_message.reply_text(
-            "Yalnızca grup yöneticisi kullanabilir."
-        )
-        return
-
-    try:
-        target = int(context.args[0])
-    except (IndexError, ValueError):
-        await update.effective_message.reply_text(
-            "Kullanım: /izin_kaldir KULLANICI_ID"
-        )
-        return
-
-    db.remove_group(target, chat.id)
-
-    await update.effective_message.reply_text("Grup izni kaldırıldı.")
-
-
 async def shutdown(app):
     for item in list(pending.values()):
         try:
@@ -755,8 +686,6 @@ def main():
     app.add_handler(CommandHandler("aralik", aralik))
     app.add_handler(CommandHandler("zaman", zaman))
     app.add_handler(CommandHandler("admin", admin_command))
-    app.add_handler(CommandHandler("izin_ver", izin_ver))
-    app.add_handler(CommandHandler("izin_kaldir", izin_kaldir))
 
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(
