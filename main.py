@@ -231,7 +231,7 @@ async def sender_loop(uid, context, chat_id):
             client = await get_client(uid)
             if not client:
                 try:
-                    await context.bot.send_message(chat_id=chat_id, text="❌ Hata: Telegram istemcisi (client) oturum açamadı.")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Hata: Telegram istemcisi oturum açamadı.")
                 except Exception:
                     pass
                 break
@@ -239,7 +239,7 @@ async def sender_loop(uid, context, chat_id):
             message_id = user.get("ad_message_id")
             if not message_id:
                 try:
-                    await context.bot.send_message(chat_id=chat_id, text="❌ Hata: Reklam mesajı ID seçilmemiş.")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Hata: Reklam mesajı seçilmemiş.")
                 except Exception:
                     pass
                 break
@@ -248,7 +248,6 @@ async def sender_loop(uid, context, chat_id):
                 if not client.is_connected():
                     await client.connect()
 
-                # Bağlı hesabın Kayıtlı Mesajlar'ından reklam metnini alalım
                 messages = await client.get_messages("me", ids=message_id)
                 if not messages:
                     msgs = await client.get_messages("me", limit=1)
@@ -259,7 +258,7 @@ async def sender_loop(uid, context, chat_id):
             except Exception as e:
                 log.exception("Reklam mesajı alınamadı: %s", e)
                 try:
-                    await context.bot.send_message(chat_id=chat_id, text=f"❌ Reklam mesajı okunurken hata: {str(e)[:80]}")
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ Reklam mesajı okunamadı: {str(e)[:80]}")
                 except Exception:
                     pass
                 break
@@ -268,7 +267,7 @@ async def sender_loop(uid, context, chat_id):
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text="❌ Bağladığın hesabın Kayıtlı Mesajlar'ında reklam bulunamadı! Lütfen o hesaptan Kayıtlı Mesajlar'a reklamını atıp tekrar 'Reklam Seç' yap."
+                        text="❌ Kayıtlı Mesajlar'da reklam bulunamadı! Lütfen o hesaba reklamı atıp tekrar 'Reklam Seç' yap."
                     )
                 except Exception:
                     pass
@@ -282,11 +281,16 @@ async def sender_loop(uid, context, chat_id):
                 dialogs = await client.get_dialogs()
                 groups = []
                 for d in dialogs:
-                    if d.is_group or d.is_supergroup or getattr(d.entity, 'megagroup', False):
+                    # Hatasız grup ve süpergrup tespiti
+                    entity = d.entity
+                    if getattr(entity, 'megagroup', False) or getattr(entity, 'broadcast', False) is False and (getattr(entity, 'title', None) or d.is_group):
                         groups.append(d)
                 
                 if not groups:
-                    groups = [d for d in dialogs if d.is_group or d.is_supergroup]
+                    # Alternatif filtre
+                    for d in dialogs:
+                        if d.is_group or d.is_channel:
+                            groups.append(d)
 
                 print(f"[DEBUG] Toplam bulunan grup sayısı: {len(groups)}")
             except Exception as e:
