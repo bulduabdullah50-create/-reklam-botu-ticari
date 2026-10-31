@@ -6,6 +6,8 @@ import string
 import logging
 from datetime import datetime
 from pathlib import Path
+from threading import Thread
+from flask import Flask
 
 from telethon import TelegramClient
 from telethon.errors import (
@@ -24,6 +26,17 @@ from telegram.ext import (
 
 import database as db
 
+# Render port kontrolü için mini web sunucusu
+app_web = Flask(__name__)
+
+@app_web.route('/')
+def home_web():
+    return "Bot aktif ve çalışıyor!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app_web.run(host="0.0.0.0", port=port)
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("farketmezda")
 
@@ -39,8 +52,8 @@ SESSIONS.mkdir(parents=True, exist_ok=True)
 clients = {}
 pending = {}
 tasks = {}
-blacklisted_groups = {}  # Genel Karaliste
-account_blacklists = {}  # Hesaba Özel Karaliste (session_name -> set)
+blacklisted_groups = {}
+account_blacklists = {}
 tur_detaylari = {}
 
 
@@ -311,7 +324,6 @@ async def sender_loop(uid, session_name, context, chat_id):
                 g_username = f"@{entity.username}".lower() if entity and getattr(entity, 'username', None) else ""
                 g_title = getattr(group, 'name', 'İsimsiz Grup')
 
-                # Hem Genel Hem de Numaraya Özel Karaliste Kontrolü
                 if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl or (g_username and g_username in acc_bl):
                     skipped_count += 1
                     detay_listesi.append(f"🚫 Engellendi/Atlandı: {g_title}")
@@ -496,14 +508,12 @@ async def button(update, context):
         user = db.get_user(uid) or {}
         current = user.get("inc_groups", 1)
         db.set_user(uid, inc_groups=0 if current else 1)
-        session_name = action.replace("toggle_g_", "")
         await button(update, context)
 
     elif action.startswith("toggle_c_"):
         user = db.get_user(uid) or {}
         current = user.get("inc_channels", 1)
         db.set_user(uid, inc_channels=0 if current else 1)
-        session_name = action.replace("toggle_c_", "")
         await button(update, context)
 
     elif action.startswith("report_"):
@@ -923,6 +933,12 @@ async def shutdown(app):
 def main():
     db.init_db()
 
+    # Flask uygulamasını arka planda daemon olarak başlatıyoruz
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
+
+    # Telegram botunu webhook yerine, Render'da sorun yaratmayacak optimize edilmiş polling ile başlatıyoruz
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -936,7 +952,8 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )
 
-    app.run_polling()
+    # Render ortamında zaman aşımını önleyen polling ayarı
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
