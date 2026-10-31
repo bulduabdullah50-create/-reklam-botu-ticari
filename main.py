@@ -214,7 +214,7 @@ async def start_sender(uid, message_obj, context):
 
     db.set_user(uid, enabled=1)
     tasks[uid] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ Otomatik gönderim başlatıldı! Üye olunan tüm gruplara mesaj atılacak ve raporlanacak.")
+    await message_obj.reply_text("▶ Otomatik gönderim başlatıldı! Üye olunan tüm gruplara mesaj atılacak.")
 
 
 async def sender_loop(uid, context, chat_id):
@@ -223,36 +223,63 @@ async def sender_loop(uid, context, chat_id):
             user = db.get_user(uid)
 
             if not user or not user.get("enabled", 0):
+                print(f"[DEBUG] Kullanıcı {uid} için gönderim kapalı, döngü kırılıyor.")
                 break
 
             if not has_valid_access(uid):
+                print(f"[DEBUG] Kullanıcı {uid} lisansı geçersiz, döngü kırılıyor.")
                 break
 
             client = await get_client(uid)
             if not client:
-                log.warning("Gönderim döngüsü: Telegram client alınamadı (uid: %s)", uid)
+                print(f"[DEBUG] Kullanıcı {uid} client alınamadı.")
                 break
 
             message_id = user.get("ad_message_id")
             if not message_id:
+                print(f"[DEBUG] Kullanıcı {uid} reklam mesajı ID seçilmemiş.")
                 break
 
             try:
-                source = await client.get_messages("me", ids=message_id)
-            except Exception:
+                # Kayıtlı mesajlardan metni/içeriği alalım
+                source_messages = await client.get_messages("me", ids=message_id)
+                if not source_messages:
+                    # Alternatif olarak son mesajı deneyelim
+                    msgs = await client.get_messages("me", limit=1)
+                    source = msgs[0] if msgs else None
+                else:
+                    source = source_messages
+            except Exception as e:
+                print(f"[DEBUG] Reklam mesajı alınırken hata: {e}")
                 log.exception("Reklam mesajı alınamadı")
                 break
 
             if not source:
-                log.warning("Kaynak reklam mesajı bulunamadı (ID: %s)", message_id)
+                print(f"[DEBUG] Kaynak mesaj bulunamadı.")
                 break
 
             try:
                 if not client.is_connected():
                     await client.connect()
-                dialogs = await client.get_dialogs(limit=200)
-                groups = [d for d in dialogs if d.is_group or d.is_supergroup]
-            except Exception:
+                
+                # Tüm dialogları çekiyoruz
+                dialogs = await client.get_dialogs()
+                groups = []
+                for d in dialogs:
+                    # Grup veya süpergrup kontrolü
+                    if d.is_group or d.is_supergraph or getattr(d.entity, 'megagroup', False) or getattr(d.entity, 'broadcast', False) == False and (d.is_group or hasattr(d.entity, 'participants_count')):
+                        groups.append(d)
+                
+                # Kesin çözüm için alternatif: sohbet türü grup olanlar
+                if not groups:
+                    for d in dialogs:
+                        if d.is_group or d.is_supergroup:
+                            groups.append(d)
+                
+                print(f"[DEBUG] Bulunan toplam grup/kanal sayısı: {len(groups)}")
+
+            except Exception as e:
+                print(f"[DEBUG] Gruplar çekilirken hata: {e}")
                 log.exception("Gruplar çekilirken hata")
                 await asyncio.sleep(10)
                 continue
@@ -274,7 +301,7 @@ async def sender_loop(uid, context, chat_id):
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🚀 **Yeni Tur Başladı!**\nToplam taranan grup: {len(groups)}"
+                    text=f"🚀 **Yeni Tur Başladı!**\nTaranan grup/sohbet sayısı: {len(groups)}"
                 )
             except Exception:
                 pass
@@ -286,7 +313,7 @@ async def sender_loop(uid, context, chat_id):
 
                 g_id = str(group.id)
                 g_username = f"@{group.entity.username}".lower() if getattr(group.entity, 'username', None) else ""
-                g_title = group.name or "İsimsiz Grup"
+                g_title = getattr(group, 'name', 'İsimsiz Grup')
 
                 if g_id in user_bl or (g_username and g_username in user_bl):
                     skipped_count += 1
@@ -298,6 +325,7 @@ async def sender_loop(uid, context, chat_id):
                         messages=source
                     )
                     success_count += 1
+                    print(f"[DEBUG] Başarıyla gönderildi -> {g_title} ({group.id})")
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -308,6 +336,7 @@ async def sender_loop(uid, context, chat_id):
 
                 except FloodWaitError as exc:
                     log.warning("Telegram bekleme sınırı: %s saniye", exc.seconds)
+                    print(f"[DEBUG] FloodWait: {exc.seconds} saniye bekleniyor.")
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -316,8 +345,9 @@ async def sender_loop(uid, context, chat_id):
                     except Exception:
                         pass
                     await asyncio.sleep(exc.seconds + 5)
-                except Exception:
+                except Exception as e:
                     fail_count += 1
+                    print(f"[DEBUG] Gönderim hatası ({g_title}): {e}")
                     log.exception("Gönderim hatası: kullanıcı=%s grup=%s", uid, group.id)
 
                 if group_interval > 0:
@@ -344,7 +374,8 @@ async def sender_loop(uid, context, chat_id):
 
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] Döngü genel hata: {e}")
         log.exception("Gönderim döngüsü hatası")
     finally:
         db.set_user(uid, enabled=0)
@@ -390,7 +421,6 @@ async def button(update, context):
         )
 
     elif action == "remove_acc":
-        # Oturumu durdur ve istemci bağlantısını kes
         await stop_sender(uid)
         client = clients.pop(uid, None)
         if client:
@@ -402,7 +432,6 @@ async def button(update, context):
                 except Exception:
                     pass
 
-        # Session dosyasını sil
         path = SESSIONS / str(uid)
         session_file = Path(str(path) + ".session")
         if session_file.exists():
