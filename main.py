@@ -200,7 +200,7 @@ async def start_sender(uid, message_obj, context):
 
     client = await get_client(uid)
     if not client:
-        await message_obj.reply_text("❌ Reklam yapacak Telegram hesabı bağlı değil! Önce 'Hesap Ekle' ile numarayı bağla.")
+        await message_obj.reply_text("❌ Reklam atacak Telegram hesabı bağlı değil! Önce 'Hesap Ekle' ile numarayı bağla.")
         return
 
     if not user or not user.get("ad_message_id"):
@@ -214,7 +214,7 @@ async def start_sender(uid, message_obj, context):
 
     db.set_user(uid, enabled=1)
     tasks[uid] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ Otomatik gönderim başlatıldı! Farklı hesap üzerinden gruplara mesajlar akmaya başlayacak.")
+    await message_obj.reply_text("▶ Otomatik gönderim başlatıldı! Gruplara mesajlar akmaya başlayacak.")
 
 
 async def sender_loop(uid, context, chat_id):
@@ -230,17 +230,25 @@ async def sender_loop(uid, context, chat_id):
 
             client = await get_client(uid)
             if not client:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Hata: Telegram istemcisi (client) oturum açamadı.")
+                except Exception:
+                    pass
                 break
 
             message_id = user.get("ad_message_id")
             if not message_id:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Hata: Reklam mesajı ID seçilmemiş.")
+                except Exception:
+                    pass
                 break
 
             try:
                 if not client.is_connected():
                     await client.connect()
 
-                # Bağlı olan farklı hesabın Kayıtlı Mesajlar'ından reklamı çekiyoruz
+                # Bağlı hesabın Kayıtlı Mesajlar'ından reklam metnini alalım
                 messages = await client.get_messages("me", ids=message_id)
                 if not messages:
                     msgs = await client.get_messages("me", limit=1)
@@ -250,17 +258,25 @@ async def sender_loop(uid, context, chat_id):
 
             except Exception as e:
                 log.exception("Reklam mesajı alınamadı: %s", e)
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ Reklam mesajı okunurken hata: {str(e)[:80]}")
+                except Exception:
+                    pass
                 break
 
             if not source_msg:
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text="❌ Bağlı hesabın Kayıtlı Mesajlar'ında reklam bulunamadı! Lütfen o hesaba reklamı atıp tekrar 'Reklam Seç' yap."
+                        text="❌ Bağladığın hesabın Kayıtlı Mesajlar'ında reklam bulunamadı! Lütfen o hesaptan Kayıtlı Mesajlar'a reklamını atıp tekrar 'Reklam Seç' yap."
                     )
                 except Exception:
                     pass
                 break
+
+            ad_text = getattr(source_msg, 'text', '') or getattr(source_msg, 'message', '')
+            if not ad_text:
+                ad_text = "Reklam İçeriği"
 
             try:
                 dialogs = await client.get_dialogs()
@@ -272,8 +288,13 @@ async def sender_loop(uid, context, chat_id):
                 if not groups:
                     groups = [d for d in dialogs if d.is_group or d.is_supergroup]
 
+                print(f"[DEBUG] Toplam bulunan grup sayısı: {len(groups)}")
             except Exception as e:
                 log.exception("Gruplar çekilirken hata: %s", e)
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ Gruplar taranırken hata: {str(e)[:80]}")
+                except Exception:
+                    pass
                 await asyncio.sleep(10)
                 continue
 
@@ -313,11 +334,9 @@ async def sender_loop(uid, context, chat_id):
                     continue
 
                 try:
-                    await client.forward_messages(
-                        entity=group.id,
-                        messages=source_msg
-                    )
+                    await client.send_message(group.id, ad_text)
                     success_count += 1
+                    print(f"[DEBUG] Gönderildi -> {g_title}")
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -338,6 +357,7 @@ async def sender_loop(uid, context, chat_id):
                     await asyncio.sleep(exc.seconds + 5)
                 except Exception as e:
                     fail_count += 1
+                    print(f"[DEBUG] Gönderim hatası ({g_title}): {e}")
                     log.exception("Gönderim hatası (%s): %s", g_title, e)
 
                 if group_interval > 0:
@@ -366,6 +386,10 @@ async def sender_loop(uid, context, chat_id):
         raise
     except Exception as e:
         log.exception("Gönderim döngüsü genel hata: %s", e)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Kritik Döngü Hatası: {str(e)[:100]}")
+        except Exception:
+            pass
     finally:
         db.set_user(uid, enabled=0)
         tasks.pop(uid, None)
