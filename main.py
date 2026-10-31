@@ -26,12 +26,12 @@ from telegram.ext import (
 
 import database as db
 
-# Render port kontrolü için mini web sunucusu
+# Render ve dış tetikleyiciler için web sunucusu
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home_web():
-    return "Bot aktif ve çalışıyor!"
+    return "Bot aktif ve çalışıyor! Hata bildirim koruması devrede."
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -140,32 +140,6 @@ async def get_client(session_name):
     except Exception:
         log.exception("Client yükleme hatası")
         return None
-
-
-def get_license_info_text(uid):
-    if is_admin(uid):
-        return "👑 Sınırsız (Yönetici)"
-    
-    user = db.get_user(uid)
-    if not user or not db.license_valid(uid):
-        return "❌ Aktif Lisans Yok"
-    
-    expiry = user.get("license_expiry")
-    if not expiry:
-        return "✅ Aktif"
-    
-    try:
-        if isinstance(expiry, str):
-            exp_date = datetime.fromisoformat(expiry)
-        else:
-            exp_date = expiry
-        
-        remaining = exp_date - datetime.utcnow()
-        days = remaining.days
-        hours = remaining.seconds // 3600
-        return f"✅ Aktif ({days} Gün {hours} Saat Kalan)"
-    except Exception:
-        return "✅ Aktif"
 
 
 async def show_home(update, context):
@@ -372,8 +346,16 @@ async def sender_loop(uid, session_name, context, chat_id):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("Gönderim döngüsü genel hata koruması: %s", e)
-            await asyncio.sleep(10)
+            # KRİTİK HATA YAKALAYICI: Bot durursa sebebini sana anında mesaj atacak!
+            log.exception("Döngü durdu, hata: %s", e)
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🚨 **DÖNGÜ DURDU / HATA ALINDI!**\n\nHesap: `{session_name}`\nHata Detayı: `{str(e)}`"
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(15)
     
     tasks.pop(task_key, None)
 
