@@ -40,8 +40,7 @@ clients = {}
 pending = {}
 tasks = {}
 
-# Kullanıcı bazlı karaliste (engellenen grup ID/Username'leri)
-blacklisted_groups = {}  # {uid: set(group_identifiers)}
+blacklisted_groups = {}
 
 
 def is_admin(uid):
@@ -56,15 +55,19 @@ def get_keyboard(uid):
     rows = [
         [
             InlineKeyboardButton("➕ Hesap Ekle", callback_data="add"),
+            InlineKeyboardButton("❌ Hesap Çıkar", callback_data="remove_acc"),
+        ],
+        [
             InlineKeyboardButton("👤 Hesabım", callback_data="account"),
-        ],
-        [
             InlineKeyboardButton("📩 Reklam Seç", callback_data="ad"),
-            InlineKeyboardButton("🚫 Grup Engel", callback_data="blacklist"),
         ],
         [
+            InlineKeyboardButton("🚫 Grup Engel", callback_data="blacklist"),
             InlineKeyboardButton("⏱ Grup Aralığı", callback_data="time_group"),
+        ],
+        [
             InlineKeyboardButton("⏳ Tur Süresi", callback_data="time_loop"),
+            InlineKeyboardButton("📊 Durum", callback_data="status"),
         ],
         [
             InlineKeyboardButton("▶ Başlat", callback_data="start_send"),
@@ -72,13 +75,10 @@ def get_keyboard(uid):
         ],
         [
             InlineKeyboardButton("🔑 KEY Kullan", callback_data="redeem"),
-            InlineKeyboardButton("📊 Durum", callback_data="status"),
-        ],
-        [
             InlineKeyboardButton(
                 "💬 İletişim",
                 url="https://t.me/farketmezda"
-            )
+            ),
         ],
     ]
 
@@ -117,8 +117,9 @@ async def get_client(uid):
             pass
 
     path = SESSIONS / str(uid)
+    session_file = Path(str(path) + ".session")
 
-    if not Path(str(path) + ".session").exists():
+    if not session_file.exists():
         return None
 
     try:
@@ -132,7 +133,7 @@ async def get_client(uid):
         clients[uid] = client
         return client
     except Exception:
-        log.exception("Client oluşturma hatası")
+        log.exception("Client yükleme hatası")
         return None
 
 
@@ -190,45 +191,49 @@ async def start(update, context):
     await show_home(update, context)
 
 
-async def start_sender(uid, message):
+async def start_sender(uid, message_obj, context):
     if not has_valid_access(uid):
-        await message.reply_text("❌ Aktif lisansın bulunmuyor! Lütfen geçerli bir KEY kullan.")
+        await message_obj.reply_text("❌ Aktif lisansın bulunmuyor! Lütfen geçerli bir KEY kullan.")
         return
 
     user = db.get_user(uid)
 
     client = await get_client(uid)
     if not client:
-        await message.reply_text("❌ Önce Telegram hesabını bağla.")
+        await message_obj.reply_text("❌ Telegram oturumu bulunamadı. Lütfen önce 'Hesap Ekle' kısmından hesabını bağla.")
         return
 
-    if not user["ad_message_id"]:
-        await message.reply_text("❌ Önce Reklam Seç bölümünü kullan.")
+    if not user or not user.get("ad_message_id"):
+        await message_obj.reply_text("❌ Önce Reklam Seç bölümünü kullan.")
         return
 
     current = tasks.get(uid)
     if current and not current.done():
-        await message.reply_text("⚠️ Gönderim zaten çalışıyor.")
+        await message_obj.reply_text("⚠️ Gönderim zaten çalışıyor.")
         return
 
     db.set_user(uid, enabled=1)
-    tasks[uid] = asyncio.create_task(sender_loop(uid))
-    await message.reply_text("▶ Otomatik gönderim başlatıldı! Üye olunan tüm gruplara mesaj atılacak.")
+    tasks[uid] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
+    await message_obj.reply_text("▶ Otomatik gönderim başlatıldı! Üye olunan tüm gruplara mesaj atılacak ve raporlanacak.")
 
 
-async def sender_loop(uid):
+async def sender_loop(uid, context, chat_id):
     try:
         while True:
             user = db.get_user(uid)
 
-            if not user or not user["enabled"] or not has_valid_access(uid):
+            if not user or not user.get("enabled", 0):
+                break
+
+            if not has_valid_access(uid):
                 break
 
             client = await get_client(uid)
             if not client:
+                log.warning("Gönderim döngüsü: Telegram client alınamadı (uid: %s)", uid)
                 break
 
-            message_id = user["ad_message_id"]
+            message_id = user.get("ad_message_id")
             if not message_id:
                 break
 
@@ -239,9 +244,9 @@ async def sender_loop(uid):
                 break
 
             if not source:
+                log.warning("Kaynak reklam mesajı bulunamadı (ID: %s)", message_id)
                 break
 
-            # Üye olunan tüm grupları doğrudan Telegram API'den çek
             try:
                 if not client.is_connected():
                     await client.connect()
@@ -249,24 +254,42 @@ async def sender_loop(uid):
                 groups = [d for d in dialogs if d.is_group or d.is_supergroup]
             except Exception:
                 log.exception("Gruplar çekilirken hata")
-                break
+                await asyncio.sleep(10)
+                continue
 
             user_bl = blacklisted_groups.get(uid, set())
             
             loop_interval = user.get("loop_interval_seconds", 240)
+            if loop_interval is None:
+                loop_interval = 240
+                
             group_interval = user.get("interval_seconds", 3)
+            if group_interval is None:
+                group_interval = 3
+
+            success_count = 0
+            fail_count = 0
+            skipped_count = 0
+
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🚀 **Yeni Tur Başladı!**\nToplam taranan grup: {len(groups)}"
+                )
+            except Exception:
+                pass
 
             for group in groups:
                 user = db.get_user(uid)
-                if not user or not user["enabled"]:
+                if not user or not user.get("enabled", 0):
                     break
 
-                # Engellenen grup kontrolü (ID, link veya username eşleşmesi)
                 g_id = str(group.id)
                 g_username = f"@{group.entity.username}".lower() if getattr(group.entity, 'username', None) else ""
-                
+                g_title = group.name or "İsimsiz Grup"
+
                 if g_id in user_bl or (g_username and g_username in user_bl):
-                    log.info(f"Grup karalistede olduğu için atlandı: {group.name}")
+                    skipped_count += 1
                     continue
 
                 try:
@@ -274,17 +297,46 @@ async def sender_loop(uid):
                         entity=group.id,
                         messages=source
                     )
+                    success_count += 1
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"✅ Gönderildi: **{g_title}**"
+                        )
+                    except Exception:
+                        pass
+
                 except FloodWaitError as exc:
                     log.warning("Telegram bekleme sınırı: %s saniye", exc.seconds)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"⏳ Telegram Flood Sınırı! {exc.seconds} saniye bekleniyor..."
+                        )
+                    except Exception:
+                        pass
                     await asyncio.sleep(exc.seconds + 5)
                 except Exception:
+                    fail_count += 1
                     log.exception("Gönderim hatası: kullanıcı=%s grup=%s", uid, group.id)
 
                 if group_interval > 0:
                     await asyncio.sleep(group_interval)
 
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📊 **Tur Tamamlandı Raporu**\n\n"
+                         f"✅ Başarılı: {success_count}\n"
+                         f"❌ Hatalı: {fail_count}\n"
+                         f"🚫 Engellenen: {skipped_count}\n\n"
+                         f"⏳ Sıradaki tur için {loop_interval} saniye bekleniyor..."
+                )
+            except Exception:
+                pass
+
             user = db.get_user(uid)
-            if not user or not user["enabled"]:
+            if not user or not user.get("enabled", 0):
                 break
 
             if loop_interval > 0:
@@ -321,7 +373,6 @@ async def button(update, context):
         )
 
     elif action == "add":
-        # KEY Kontrolü
         if not has_valid_access(uid):
             await q.edit_message_text(
                 "❌ **Erişim Engellendi!**\nHesap eklemek için aktif lisansınızın bulunması gerekir.\nLütfen önce '🔑 KEY Kullan' butonundan kodunuzu girin.",
@@ -336,6 +387,33 @@ async def button(update, context):
             "Örnek: +905xxxxxxxxx\n\n"
             "Doğrulama kodunu ve şifreni kimseyle paylaşma.",
             reply_markup=sub_menu_keyboard()
+        )
+
+    elif action == "remove_acc":
+        # Oturumu durdur ve istemci bağlantısını kes
+        await stop_sender(uid)
+        client = clients.pop(uid, None)
+        if client:
+            try:
+                await client.log_out()
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+        # Session dosyasını sil
+        path = SESSIONS / str(uid)
+        session_file = Path(str(path) + ".session")
+        if session_file.exists():
+            try:
+                session_file.unlink()
+            except Exception:
+                pass
+
+        await q.edit_message_text(
+            "✅ **Telegram Hesabı Bağlantısı Kesildi ve Çıkarıldı.**\n\nYeni bir hesap bağlamak için '➕ Hesap Ekle' butonunu kullanabilirsin.",
+            reply_markup=get_keyboard(uid)
         )
 
     elif action == "account":
@@ -399,7 +477,7 @@ async def button(update, context):
 
     elif action == "time_group":
         user = db.get_user(uid)
-        seconds = user["interval_seconds"] if user and "interval_seconds" in user else 3
+        seconds = user["interval_seconds"] if user and user.get("interval_seconds") is not None else 3
         context.user_data["flow"] = "interval_group"
 
         await q.edit_message_text(
@@ -410,7 +488,7 @@ async def button(update, context):
 
     elif action == "time_loop":
         user = db.get_user(uid)
-        loop_sec = user["loop_interval_seconds"] if user and "loop_interval_seconds" in user else 240
+        loop_sec = user["loop_interval_seconds"] if user and user.get("loop_interval_seconds") is not None else 240
         context.user_data["flow"] = "interval_loop"
 
         await q.edit_message_text(
@@ -427,7 +505,7 @@ async def button(update, context):
         )
 
     elif action == "start_send":
-        await start_sender(uid, q.message)
+        await start_sender(uid, q.message, context)
 
     elif action == "stop_send":
         await stop_sender(uid)
@@ -440,18 +518,19 @@ async def button(update, context):
         user = db.get_user(uid)
         path = SESSIONS / str(uid)
         connected = Path(str(path) + ".session").exists()
-        grp_int = user.get("interval_seconds", 3) if user else 3
-        loop_int = user.get("loop_interval_seconds", 240) if user else 240
+        grp_int = user.get("interval_seconds", 3) if user and user.get("interval_seconds") is not None else 3
+        loop_int = user.get("loop_interval_seconds", 240) if user and user.get("loop_interval_seconds") is not None else 240
         lic_status = get_license_info_text(uid)
+        is_enabled = user.get("enabled", 0) if user else 0
 
         await q.edit_message_text(
             "📊 SİSTEM DURUMU\n\n"
             f"Hesap: {'Bağlı' if connected else 'Bağlı değil'}\n"
             f"Lisans Durumu: {lic_status}\n"
-            f"Reklam: {'Seçildi' if user and user['ad_message_id'] else 'Seçilmedi'}\n"
+            f"Reklam: {'Seçildi' if user and user.get('ad_message_id') else 'Seçilmedi'}\n"
             f"Grup Aralığı: {grp_int} saniye\n"
             f"Tur Süresi: {loop_int} saniye\n"
-            f"Gönderim Durumu: {'Aktif' if user and user['enabled'] else 'Kapalı'}",
+            f"Gönderim Durumu: {'Aktif' if is_enabled else 'Kapalı'}",
             reply_markup=get_keyboard(uid)
         )
 
@@ -592,7 +671,6 @@ async def text_handler(update, context):
             await update.effective_message.reply_text("Giriş tamamlanamadı.")
 
     elif flow == "blacklist":
-        # Link veya username temizle
         clean_target = text.replace("https://t.me/", "").replace("t.me/", "").strip()
         if not clean_target.startswith("@") and not clean_target.lstrip("-").isdigit():
             clean_target = "@" + clean_target
@@ -704,7 +782,7 @@ def main():
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", lambda u, c: start(u, c)))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
