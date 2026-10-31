@@ -223,19 +223,22 @@ async def start_sender(uid, session_name, message_obj, context):
 
 
 async def sender_loop(uid, session_name, context, chat_id):
-    try:
-        while True:
+    task_key = f"{uid}_{session_name}"
+    while True:
+        try:
             if not has_valid_access(uid):
                 break
 
             client = await get_client(session_name)
             if not client:
-                break
+                await asyncio.sleep(15)
+                continue
 
             user = db.get_user(uid)
             message_id = user.get("ad_message_id") if user else None
             if not message_id:
-                break
+                await asyncio.sleep(15)
+                continue
 
             try:
                 if not client.is_connected():
@@ -247,10 +250,10 @@ async def sender_loop(uid, session_name, context, chat_id):
                     source_msg = msgs[0] if msgs else None
                 else:
                     source_msg = messages
-
             except Exception as e:
                 log.exception("Reklam mesajı alınamadı: %s", e)
-                break
+                await asyncio.sleep(15)
+                continue
 
             if not source_msg:
                 try:
@@ -260,7 +263,8 @@ async def sender_loop(uid, session_name, context, chat_id):
                     )
                 except Exception:
                     pass
-                break
+                await asyncio.sleep(30)
+                continue
 
             ad_text = getattr(source_msg, 'text', '') or getattr(source_msg, 'message', '')
             if not ad_text:
@@ -292,7 +296,7 @@ async def sender_loop(uid, session_name, context, chat_id):
                             groups.append(d)
             except Exception as e:
                 log.exception("Gruplar çekilirken hata: %s", e)
-                await asyncio.sleep(10)
+                await asyncio.sleep(15)
                 continue
 
             user_bl = blacklisted_groups.get(uid, set())
@@ -315,7 +319,6 @@ async def sender_loop(uid, session_name, context, chat_id):
                 pass
 
             for group in groups:
-                task_key = f"{uid}_{session_name}"
                 if task_key not in tasks:
                     break
 
@@ -366,13 +369,13 @@ async def sender_loop(uid, session_name, context, chat_id):
             if loop_interval > 0:
                 await asyncio.sleep(loop_interval)
 
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        log.exception("Gönderim döngüsü genel hata: %s", e)
-    finally:
-        task_key = f"{uid}_{session_name}"
-        tasks.pop(task_key, None)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.exception("Gönderim döngüsü genel hata koruması: %s", e)
+            await asyncio.sleep(10)
+    
+    tasks.pop(task_key, None)
 
 
 async def stop_sender(uid, session_name, chat_id, context):
@@ -938,7 +941,6 @@ def main():
     t.daemon = True
     t.start()
 
-    # Telegram botunu webhook yerine, Render'da sorun yaratmayacak optimize edilmiş polling ile başlatıyoruz
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -952,7 +954,6 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )
 
-    # Render ortamında zaman aşımını önleyen polling ayarı
     app.run_polling(drop_pending_updates=True)
 
 
