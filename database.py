@@ -1,290 +1,270 @@
 
-import os
 import sqlite3
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-DB_NAME = os.getenv("DB_NAME", "bot_system.db")
+DB_PATH = Path("data/bot.db")
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def connect():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
     with connect() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            api_id INTEGER,
-            api_hash TEXT,
-            phone TEXT,
-            session_string TEXT,
-            is_active INTEGER DEFAULT 0,
-            license_expiry TEXT,
-            is_admin INTEGER DEFAULT 0,
-            ad_message_id INTEGER,
-            interval_seconds INTEGER DEFAULT 3600,
-            enabled INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS licenses (
-            code TEXT PRIMARY KEY,
-            duration_days INTEGER NOT NULL,
-            is_used INTEGER DEFAULT 0,
-            used_by INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS tasks (
-            user_id INTEGER PRIMARY KEY,
-            custom_message TEXT,
-            target_groups TEXT,
-            interval_minutes INTEGER DEFAULT 10
-        );
-
-        CREATE TABLE IF NOT EXISTS approved_groups (
-            user_id INTEGER NOT NULL,
-            chat_id INTEGER NOT NULL,
-            title TEXT,
-            approved_by INTEGER,
-            PRIMARY KEY (user_id, chat_id)
-        );
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                ad_message_id INTEGER,
+                interval_seconds INTEGER NOT NULL DEFAULT 3600,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT
+            )
         """)
 
-        # Eski veritabanlarına yeni sütunları ekle.
-        columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(users)").fetchall()
-        }
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS approved_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                title TEXT,
+                approved_by INTEGER,
+                created_at TEXT,
+                UNIQUE(user_id, chat_id)
+            )
+        """)
 
-        migrations = {
-            "username": "TEXT",
-            "api_id": "INTEGER",
-            "api_hash": "TEXT",
-            "phone": "TEXT",
-            "session_string": "TEXT",
-            "is_active": "INTEGER DEFAULT 0",
-            "license_expiry": "TEXT",
-            "is_admin": "INTEGER DEFAULT 0",
-            "ad_message_id": "INTEGER",
-            "interval_seconds": "INTEGER DEFAULT 3600",
-            "enabled": "INTEGER DEFAULT 0",
-        }
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS licenses (
+                code TEXT PRIMARY KEY,
+                duration_days INTEGER NOT NULL,
+                is_used INTEGER NOT NULL DEFAULT 0,
+                used_by INTEGER,
+                created_at TEXT,
+                expires_at TEXT
+            )
+        """)
 
-        for name, definition in migrations.items():
-            if name not in columns:
-                conn.execute(
-                    f"ALTER TABLE users ADD COLUMN {name} {definition}"
-                )
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_groups_user
+            ON approved_groups(user_id)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_licenses_user
+            ON licenses(used_by)
+        """)
 
         conn.commit()
 
 
-def add_user(user_id, username=None):
-    with connect() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO users(user_id, username) VALUES(?, ?)",
-            (user_id, username)
-        )
-        if username is not None:
-            conn.execute(
-                "UPDATE users SET username=? WHERE user_id=?",
-                (username, user_id)
-            )
-        conn.execute(
-            "INSERT OR IGNORE INTO tasks(user_id) VALUES(?)",
-            (user_id,)
-        )
-
-
 def ensure_user(user_id, username=None):
-    add_user(user_id, username)
+    now = datetime.now(timezone.utc).isoformat()
+
+    with connect() as conn:
+        conn.execute("""
+            INSERT INTO users (user_id, username, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = COALESCE(excluded.username, users.username)
+        """, (int(user_id), username, now))
+
+        conn.commit()
 
 
 def get_user(user_id):
+    ensure_user(user_id)
+
     with connect() as conn:
-        return conn.execute(
-            "SELECT * FROM users WHERE user_id=?",
-            (user_id,)
+        row = conn.execute(
+            "SELECT * FROM users WHERE user_id = ?",
+            (int(user_id),)
         ).fetchone()
+
+    return dict(row) if row else None
 
 
 def set_user(user_id, **kwargs):
     allowed = {
         "username",
-        "api_id",
-        "api_hash",
-        "phone",
-        "session_string",
-        "is_active",
-        "license_expiry",
-        "is_admin",
         "ad_message_id",
         "interval_seconds",
         "enabled",
     }
 
-    fields = {
+    values = {
         key: value
         for key, value in kwargs.items()
         if key in allowed
     }
 
-    if not fields:
+    if not values:
         return
 
     ensure_user(user_id)
 
+    columns = ", ".join(f"{key} = ?" for key in values)
+    params = list(values.values()) + [int(user_id)]
+
     with connect() as conn:
-        sql = ", ".join(f"{key}=?" for key in fields)
         conn.execute(
-            f"UPDATE users SET {sql} WHERE user_id=?",
-            (*fields.values(), user_id)
+            f"UPDATE users SET {columns} WHERE user_id = ?",
+            params
         )
+        conn.commit()
 
 
-def save_session(user_id, api_id, api_hash, phone, session_string):
+def approve_group(user_id, chat_id, title, approved_by=None):
     ensure_user(user_id)
-    set_user(
-        user_id,
-        api_id=api_id,
-        api_hash=api_hash,
-        phone=phone,
-        session_string=session_string,
-        is_active=1
-    )
 
-
-def approve_group(user_id, chat_id, title=None, approved_by=None):
-    ensure_user(user_id)
+    now = datetime.now(timezone.utc).isoformat()
 
     with connect() as conn:
         conn.execute("""
             INSERT INTO approved_groups
-                (user_id, chat_id, title, approved_by)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, chat_id)
-            DO UPDATE SET
-                title=excluded.title,
-                approved_by=excluded.approved_by
-        """, (user_id, chat_id, title, approved_by))
+                (user_id, chat_id, title, approved_by, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, chat_id) DO UPDATE SET
+                title = excluded.title,
+                approved_by = excluded.approved_by
+        """, (
+            int(user_id),
+            int(chat_id),
+            str(title),
+            approved_by,
+            now
+        ))
+
+        conn.commit()
 
 
 def remove_group(user_id, chat_id):
     with connect() as conn:
-        conn.execute(
-            "DELETE FROM approved_groups WHERE user_id=? AND chat_id=?",
-            (user_id, chat_id)
-        )
+        conn.execute("""
+            DELETE FROM approved_groups
+            WHERE user_id = ? AND chat_id = ?
+        """, (int(user_id), int(chat_id)))
+
+        conn.commit()
 
 
 def groups_for(user_id):
     with connect() as conn:
-        return conn.execute(
-            "SELECT chat_id, title, approved_by FROM approved_groups "
-            "WHERE user_id=? ORDER BY title",
-            (user_id,)
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT chat_id, title, approved_by, created_at
+            FROM approved_groups
+            WHERE user_id = ?
+            ORDER BY title
+        """, (int(user_id),)).fetchall()
 
-
-def get_task(user_id):
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-
-def update_task(user_id, **kwargs):
-    allowed = {
-        "custom_message",
-        "target_groups",
-        "interval_minutes"
-    }
-
-    fields = {
-        key: value
-        for key, value in kwargs.items()
-        if key in allowed
-    }
-
-    if not fields:
-        return
-
-    with connect() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO tasks(user_id) VALUES(?)",
-            (user_id,)
-        )
-        sql = ", ".join(f"{key}=?" for key in fields)
-        conn.execute(
-            f"UPDATE tasks SET {sql} WHERE user_id=?",
-            (*fields.values(), user_id)
-        )
+    return [dict(row) for row in rows]
 
 
 def create_license(code, duration_days):
+    duration_days = int(duration_days)
+
+    if duration_days < 1:
+        raise ValueError("Lisans süresi en az 1 gün olmalı.")
+
+    now = datetime.now(timezone.utc).isoformat()
+
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO licenses(code, duration_days) VALUES(?, ?)",
-            (code, duration_days)
-        )
+        conn.execute("""
+            INSERT INTO licenses
+                (code, duration_days, is_used, created_at)
+            VALUES (?, ?, 0, ?)
+        """, (str(code), duration_days, now))
+
+        conn.commit()
+
+
+def list_licenses():
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT code, duration_days, is_used, used_by,
+                   created_at, expires_at
+            FROM licenses
+            ORDER BY created_at DESC
+            LIMIT 100
+        """).fetchall()
+
+    return [dict(row) for row in rows]
 
 
 def use_license(user_id, code):
+    user_id = int(user_id)
+    code = str(code).strip().upper()
     now = datetime.now(timezone.utc)
 
+    ensure_user(user_id)
+
     with connect() as conn:
-        lic = conn.execute(
-            "SELECT duration_days, is_used FROM licenses WHERE code=?",
-            (code,)
-        ).fetchone()
+        conn.execute("BEGIN IMMEDIATE")
 
-        if not lic or lic["is_used"]:
-            return False, "Geçersiz veya kullanılmış lisans!"
+        license_row = conn.execute("""
+            SELECT * FROM licenses
+            WHERE code = ?
+        """, (code,)).fetchone()
 
-        user = conn.execute(
-            "SELECT license_expiry FROM users WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
+        if not license_row:
+            conn.rollback()
+            return False, "KEY bulunamadı."
 
-        base = now
+        if license_row["is_used"]:
+            conn.rollback()
+            return False, "Bu KEY daha önce kullanılmış."
 
-        if user and user["license_expiry"]:
-            try:
-                old = datetime.fromisoformat(user["license_expiry"])
-                if old > now:
-                    base = old
-            except ValueError:
-                pass
-
-        expiry = (
-            base + timedelta(days=int(lic["duration_days"]))
-        ).isoformat()
-
-        conn.execute(
-            "UPDATE licenses SET is_used=1, used_by=? WHERE code=?",
-            (user_id, code)
-        )
-        conn.execute(
-            "UPDATE users SET license_expiry=? WHERE user_id=?",
-            (expiry, user_id)
+        expires = now + timedelta(
+            days=int(license_row["duration_days"])
         )
 
-    return True, f"Lisans aktifleştirildi. Bitiş: {expiry}"
+        conn.execute("""
+            UPDATE licenses
+            SET is_used = 1,
+                used_by = ?,
+                expires_at = ?
+            WHERE code = ? AND is_used = 0
+        """, (
+            user_id,
+            expires.isoformat(),
+            code
+        ))
+
+        conn.commit()
+
+    return True, (
+        f"{license_row['duration_days']} günlük lisans aktifleştirildi. "
+        f"Bitiş: {expires.strftime('%d.%m.%Y %H:%M')} UTC"
+    )
 
 
 def license_valid(user_id):
-    user = get_user(user_id)
+    now = datetime.now(timezone.utc)
 
-    if not user or not user["license_expiry"]:
+    with connect() as conn:
+        row = conn.execute("""
+            SELECT expires_at
+            FROM licenses
+            WHERE used_by = ?
+              AND is_used = 1
+            ORDER BY expires_at DESC
+            LIMIT 1
+        """, (int(user_id),)).fetchone()
+
+    if not row or not row["expires_at"]:
         return False
 
     try:
-        expiry = datetime.fromisoformat(user["license_expiry"])
-        return expiry > datetime.now(timezone.utc)
+        expires = datetime.fromisoformat(row["expires_at"])
+
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+
+        return now < expires
+
     except (ValueError, TypeError):
         return False
