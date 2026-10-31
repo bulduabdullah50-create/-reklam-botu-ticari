@@ -200,11 +200,11 @@ async def start_sender(uid, message_obj, context):
 
     client = await get_client(uid)
     if not client:
-        await message_obj.reply_text("❌ Telegram oturumu bulunamadı. Lütfen önce 'Hesap Ekle' kısmından hesabını bağla.")
+        await message_obj.reply_text("❌ Reklam yapacak Telegram hesabı bağlı değil! Önce 'Hesap Ekle' ile numarayı bağla.")
         return
 
     if not user or not user.get("ad_message_id"):
-        await message_obj.reply_text("❌ Önce Reklam Seç bölümünü kullan.")
+        await message_obj.reply_text("❌ Önce bağladığın hesabın Kayıtlı Mesajlar'ından 'Reklam Seç' bölümünü kullan.")
         return
 
     current = tasks.get(uid)
@@ -214,7 +214,7 @@ async def start_sender(uid, message_obj, context):
 
     db.set_user(uid, enabled=1)
     tasks[uid] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ Otomatik gönderim başlatıldı! Üye olunan tüm gruplara mesaj atılacak.")
+    await message_obj.reply_text("▶ Otomatik gönderim başlatıldı! Farklı hesap üzerinden gruplara mesajlar akmaya başlayacak.")
 
 
 async def sender_loop(uid, context, chat_id):
@@ -223,64 +223,57 @@ async def sender_loop(uid, context, chat_id):
             user = db.get_user(uid)
 
             if not user or not user.get("enabled", 0):
-                print(f"[DEBUG] Kullanıcı {uid} için gönderim kapalı, döngü kırılıyor.")
                 break
 
             if not has_valid_access(uid):
-                print(f"[DEBUG] Kullanıcı {uid} lisansı geçersiz, döngü kırılıyor.")
                 break
 
             client = await get_client(uid)
             if not client:
-                print(f"[DEBUG] Kullanıcı {uid} client alınamadı.")
                 break
 
             message_id = user.get("ad_message_id")
             if not message_id:
-                print(f"[DEBUG] Kullanıcı {uid} reklam mesajı ID seçilmemiş.")
-                break
-
-            try:
-                # Kayıtlı mesajlardan metni/içeriği alalım
-                source_messages = await client.get_messages("me", ids=message_id)
-                if not source_messages:
-                    # Alternatif olarak son mesajı deneyelim
-                    msgs = await client.get_messages("me", limit=1)
-                    source = msgs[0] if msgs else None
-                else:
-                    source = source_messages
-            except Exception as e:
-                print(f"[DEBUG] Reklam mesajı alınırken hata: {e}")
-                log.exception("Reklam mesajı alınamadı")
-                break
-
-            if not source:
-                print(f"[DEBUG] Kaynak mesaj bulunamadı.")
                 break
 
             try:
                 if not client.is_connected():
                     await client.connect()
-                
-                # Tüm dialogları çekiyoruz
+
+                # Bağlı olan farklı hesabın Kayıtlı Mesajlar'ından reklamı çekiyoruz
+                messages = await client.get_messages("me", ids=message_id)
+                if not messages:
+                    msgs = await client.get_messages("me", limit=1)
+                    source_msg = msgs[0] if msgs else None
+                else:
+                    source_msg = messages
+
+            except Exception as e:
+                log.exception("Reklam mesajı alınamadı: %s", e)
+                break
+
+            if not source_msg:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="❌ Bağlı hesabın Kayıtlı Mesajlar'ında reklam bulunamadı! Lütfen o hesaba reklamı atıp tekrar 'Reklam Seç' yap."
+                    )
+                except Exception:
+                    pass
+                break
+
+            try:
                 dialogs = await client.get_dialogs()
                 groups = []
                 for d in dialogs:
-                    # Grup veya süpergrup kontrolü
-                    if d.is_group or d.is_supergraph or getattr(d.entity, 'megagroup', False) or getattr(d.entity, 'broadcast', False) == False and (d.is_group or hasattr(d.entity, 'participants_count')):
+                    if d.is_group or d.is_supergroup or getattr(d.entity, 'megagroup', False):
                         groups.append(d)
                 
-                # Kesin çözüm için alternatif: sohbet türü grup olanlar
                 if not groups:
-                    for d in dialogs:
-                        if d.is_group or d.is_supergroup:
-                            groups.append(d)
-                
-                print(f"[DEBUG] Bulunan toplam grup/kanal sayısı: {len(groups)}")
+                    groups = [d for d in dialogs if d.is_group or d.is_supergroup]
 
             except Exception as e:
-                print(f"[DEBUG] Gruplar çekilirken hata: {e}")
-                log.exception("Gruplar çekilirken hata")
+                log.exception("Gruplar çekilirken hata: %s", e)
                 await asyncio.sleep(10)
                 continue
 
@@ -301,7 +294,7 @@ async def sender_loop(uid, context, chat_id):
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🚀 **Yeni Tur Başladı!**\nTaranan grup/sohbet sayısı: {len(groups)}"
+                    text=f"🚀 **Tur Başladı!**\nBağlı hesabın üye olduğu grup sayısı: {len(groups)}"
                 )
             except Exception:
                 pass
@@ -322,10 +315,9 @@ async def sender_loop(uid, context, chat_id):
                 try:
                     await client.forward_messages(
                         entity=group.id,
-                        messages=source
+                        messages=source_msg
                     )
                     success_count += 1
-                    print(f"[DEBUG] Başarıyla gönderildi -> {g_title} ({group.id})")
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -336,7 +328,6 @@ async def sender_loop(uid, context, chat_id):
 
                 except FloodWaitError as exc:
                     log.warning("Telegram bekleme sınırı: %s saniye", exc.seconds)
-                    print(f"[DEBUG] FloodWait: {exc.seconds} saniye bekleniyor.")
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -347,8 +338,7 @@ async def sender_loop(uid, context, chat_id):
                     await asyncio.sleep(exc.seconds + 5)
                 except Exception as e:
                     fail_count += 1
-                    print(f"[DEBUG] Gönderim hatası ({g_title}): {e}")
-                    log.exception("Gönderim hatası: kullanıcı=%s grup=%s", uid, group.id)
+                    log.exception("Gönderim hatası (%s): %s", g_title, e)
 
                 if group_interval > 0:
                     await asyncio.sleep(group_interval)
@@ -375,8 +365,7 @@ async def sender_loop(uid, context, chat_id):
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        print(f"[DEBUG] Döngü genel hata: {e}")
-        log.exception("Gönderim döngüsü hatası")
+        log.exception("Gönderim döngüsü genel hata: %s", e)
     finally:
         db.set_user(uid, enabled=0)
         tasks.pop(uid, None)
@@ -413,8 +402,8 @@ async def button(update, context):
 
         context.user_data["flow"] = "phone"
         await q.edit_message_text(
-            "➕ HESAP EKLE\n\n"
-            "Telefon numaranı ülke koduyla gönder.\n"
+            "➕ REKLAM ATACAK HESABI EKLE\n\n"
+            "Reklam yapacak olan diğer Telegram numaranı ülke koduyla gönder.\n"
             "Örnek: +905xxxxxxxxx\n\n"
             "Doğrulama kodunu ve şifreni kimseyle paylaşma.",
             reply_markup=sub_menu_keyboard()
@@ -441,7 +430,7 @@ async def button(update, context):
                 pass
 
         await q.edit_message_text(
-            "✅ **Telegram Hesabı Bağlantısı Kesildi ve Çıkarıldı.**\n\nYeni bir hesap bağlamak için '➕ Hesap Ekle' butonunu kullanabilirsin.",
+            "✅ **Reklam Hesabı Bağlantısı Kesildi ve Çıkarıldı.**\n\nYeni bir hesap bağlamak için '➕ Hesap Ekle' butonunu kullanabilirsin.",
             reply_markup=get_keyboard(uid)
         )
 
@@ -451,7 +440,7 @@ async def button(update, context):
         lic_status = get_license_info_text(uid)
         await q.edit_message_text(
             f"👤 HESAP BİLGİLERİ\n\n"
-            f"Oturum: {'✅ Bağlı' if exists else '❌ Bağlı değil'}\n"
+            f"Reklam Hesabı Oturumu: {'✅ Bağlı' if exists else '❌ Bağlı değil'}\n"
             f"Lisans Süresi: {lic_status}",
             reply_markup=get_keyboard(uid)
         )
@@ -461,7 +450,7 @@ async def button(update, context):
 
         if not client:
             await q.edit_message_text(
-                "❌ Önce hesabını bağla.",
+                "❌ Önce reklam atacak farklı hesabını bağla.",
                 reply_markup=get_keyboard(uid)
             )
             return
@@ -474,7 +463,7 @@ async def button(update, context):
 
             if not messages:
                 await q.edit_message_text(
-                    "❌ Kayıtlı Mesajlar boş. Lütfen Kayıtlı Mesajlar'a reklamını at.",
+                    "❌ Bağladığın hesabın Kayıtlı Mesajlar'ı boş. Lütfen o hesaptan Kayıtlı Mesajlar'a reklamını at.",
                     reply_markup=get_keyboard(uid)
                 )
                 return
@@ -482,11 +471,11 @@ async def button(update, context):
             db.set_user(uid, ad_message_id=messages[0].id)
 
             await q.edit_message_text(
-                "✅ Son Kayıtlı Mesaj reklam olarak seçildi.",
+                "✅ Bağlı hesabın Son Kayıtlı Mesajı reklam olarak seçildi.",
                 reply_markup=get_keyboard(uid)
             )
         except Exception as e:
-            log.exception("Reklam seçme hatası")
+            log.exception("Reklam seçme hatası: %s", e)
             await q.edit_message_text(
                 f"❌ Hata: {str(e)[:100]}",
                 reply_markup=get_keyboard(uid)
@@ -554,7 +543,7 @@ async def button(update, context):
 
         await q.edit_message_text(
             "📊 SİSTEM DURUMU\n\n"
-            f"Hesap: {'Bağlı' if connected else 'Bağlı değil'}\n"
+            f"Reklam Hesabı: {'Bağlı' if connected else 'Bağlı değil'}\n"
             f"Lisans Durumu: {lic_status}\n"
             f"Reklam: {'Seçildi' if user and user.get('ad_message_id') else 'Seçilmedi'}\n"
             f"Grup Aralığı: {grp_int} saniye\n"
@@ -636,7 +625,7 @@ async def text_handler(update, context):
             context.user_data["flow"] = "code"
 
             await update.effective_message.reply_text(
-                "Telegram doğrulama kodunu gönder."
+                "Reklam atacak hesaba gelen Telegram doğrulama kodunu gönder."
             )
 
         except Exception:
@@ -664,12 +653,12 @@ async def text_handler(update, context):
             context.user_data.clear()
 
             await update.effective_message.reply_text(
-                "✅ Hesap başarıyla bağlandı.",
+                "✅ Reklam atacak hesap başarıyla bağlandı! Şimdi 'Reklam Seç' butonunu kullanabilirsin.",
                 reply_markup=get_keyboard(uid)
             )
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
-            await update.effective_message.reply_text("İki adımlı doğrulama şifreni gönder.")
+            await update.effective_message.reply_text("İki adımlı doğrulama (2FA) şifreni gönder.")
         except (PhoneCodeInvalidError, PhoneCodeExpiredError):
             await update.effective_message.reply_text("Kod geçersiz veya süresi dolmuş.")
         except Exception:
@@ -690,7 +679,7 @@ async def text_handler(update, context):
             context.user_data.clear()
 
             await update.effective_message.reply_text(
-                "✅ Hesap başarıyla bağlandı.",
+                "✅ Reklam atacak hesap başarıyla bağlandı!",
                 reply_markup=get_keyboard(uid)
             )
         except PasswordHashInvalidError:
