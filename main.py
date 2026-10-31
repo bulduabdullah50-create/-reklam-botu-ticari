@@ -39,7 +39,6 @@ SESSIONS.mkdir(parents=True, exist_ok=True)
 clients = {}
 pending = {}
 tasks = {}
-
 blacklisted_groups = {}
 
 
@@ -70,10 +69,7 @@ def get_keyboard(uid):
             InlineKeyboardButton("🔑 KEY Kullan", callback_data="redeem"),
         ],
         [
-            InlineKeyboardButton(
-                "💬 İletişim",
-                url="https://t.me/farketmezda"
-            ),
+            InlineKeyboardButton("💬 İletişim", url="https://t.me/farketmezda"),
         ],
     ]
 
@@ -175,7 +171,7 @@ async def show_home(update, context):
             text, reply_markup=get_keyboard(uid)
         )
     else:
-        update.effective_message.reply_text(
+        await update.effective_message.reply_text(
             text, reply_markup=get_keyboard(uid)
         )
 
@@ -259,9 +255,10 @@ async def sender_loop(uid, session_name, context, chat_id):
                 dialogs = await client.get_dialogs()
                 groups = []
                 for d in dialogs:
-                    entity = d.entity
-                    if getattr(entity, 'megagroup', False) or getattr(entity, 'broadcast', False) is False and (getattr(entity, 'title', None) or d.is_group):
-                        groups.append(d)
+                    entity = getattr(d, 'entity', None)
+                    if entity:
+                        if getattr(entity, 'megagroup', False) or (getattr(entity, 'broadcast', False) is False and (getattr(entity, 'title', None) or d.is_group)):
+                            groups.append(d)
                 
                 if not groups:
                     for d in dialogs:
@@ -290,13 +287,13 @@ async def sender_loop(uid, session_name, context, chat_id):
                 pass
 
             for group in groups:
-                # Görev durdurulmuş mu kontrol et
                 task_key = f"{uid}_{session_name}"
                 if task_key not in tasks:
                     break
 
                 g_id = str(group.id)
-                g_username = f"@{group.entity.username}".lower() if getattr(group.entity, 'username', None) else ""
+                entity = getattr(group, 'entity', None)
+                g_username = f"@{entity.username}".lower() if entity and getattr(entity, 'username', None) else ""
                 g_title = getattr(group, 'name', 'İsimsiz Grup')
 
                 if g_id in user_bl or (g_username and g_username in user_bl):
@@ -397,7 +394,6 @@ async def button(update, context):
         )
 
     elif action == "accounts":
-        # Kullanıcının eklediği tüm oturumları bulalım (dosya adından numara/isimleri çek)
         user_sessions = list(SESSIONS.glob(f"{uid}_*.session"))
         
         if not user_sessions:
@@ -409,8 +405,7 @@ async def button(update, context):
 
         keyboard_rows = []
         for s_file in user_sessions:
-            # Dosya adından session key'i çıkaralım: örn: 123456_+905... -> +905...
-            full_name = s_file.stem  # örn: 123456_+905542339772
+            full_name = s_file.stem
             parts = full_name.split("_", 1)
             phone_num = parts[1] if len(parts) > 1 else full_name
 
@@ -430,9 +425,9 @@ async def button(update, context):
         parts = session_name.split("_", 1)
         phone_num = parts[1] if len(parts) > 1 else session_name
 
-        # Çalışıyor mu kontrol et
         task_key = f"{uid}_{session_name}"
         is_running = task_key in tasks and not tasks[task_key].done()
+        status_text = "🟢 Çalışıyor" if is_running else "🔴 Duruyor"
 
         kb = InlineKeyboardMarkup([
             [
@@ -449,7 +444,7 @@ async def button(update, context):
 
         await q.edit_message_text(
             f"📱 **Hesap Yönetimi:** `{phone_num}`\n\n"
-            f"Durum: {'🟢 Çalışıyor' import * if False else ('🟢 Çalışıyor' if is_running else '🔴 Duruyor')}",
+            f"Durum: {status_text}",
             parse_mode="Markdown",
             reply_markup=kb
         )
@@ -464,7 +459,6 @@ async def button(update, context):
 
     elif action.startswith("del_"):
         session_name = action.replace("del_", "")
-        # Görev varsa durdur
         task_key = f"{uid}_{session_name}"
         if task_key in tasks:
             tasks[task_key].cancel()
@@ -498,7 +492,6 @@ async def button(update, context):
             await q.edit_message_text("❌ Önce 'Hesaplarım' menüsünden bir hesap ekle.", reply_markup=get_keyboard(uid))
             return
 
-        # Tek hesap varsa direkt seçelim, çok varsa listeletelim
         if len(user_sessions) == 1:
             session_name = user_sessions[0].stem
             client = await get_client(session_name)
@@ -517,7 +510,6 @@ async def button(update, context):
             except Exception as e:
                 await q.edit_message_text(f"❌ Hata: {str(e)[:80]}", reply_markup=get_keyboard(uid))
         else:
-            # Birden fazla hesap varsa seçim menüsü çıkar
             kb_rows = []
             for s_file in user_sessions:
                 s_name = s_file.stem
