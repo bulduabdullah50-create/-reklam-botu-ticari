@@ -40,6 +40,7 @@ clients = {}
 pending = {}
 tasks = {}
 blacklisted_groups = {}
+tur_detaylari = {}  # Hangi hesap hangi grupta ne yapmış tutmak için
 
 
 def is_admin(uid):
@@ -257,7 +258,19 @@ async def sender_loop(uid, session_name, context, chat_id):
                 for d in dialogs:
                     entity = getattr(d, 'entity', None)
                     if entity:
-                        if getattr(entity, 'megagroup', False) or (getattr(entity, 'broadcast', False) is False and (getattr(entity, 'title', None) or d.is_group)):
+                        is_chan = getattr(entity, 'broadcast', False)
+                        is_grp = getattr(entity, 'megagroup', False) or d.is_group
+                        
+                        # Kullanıcı ayarına göre kanal veya grupları dahil etme seçeneği
+                        include_groups = user.get("inc_groups", 1)
+                        include_channels = user.get("inc_channels", 1)
+
+                        if is_grp and not include_groups:
+                            continue
+                        if is_chan and not include_channels:
+                            continue
+
+                        if is_chan or is_grp or getattr(entity, 'title', None):
                             groups.append(d)
                 
                 if not groups:
@@ -277,11 +290,13 @@ async def sender_loop(uid, session_name, context, chat_id):
             success_count = 0
             fail_count = 0
             skipped_count = 0
+            detay_listesi = []
 
+            # Tur Başlangıç Bildirimi (Sohbeti şişirmez, tek mesaj)
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🚀 **[{session_name}] Tur Başladı!**\nTaranan grup sayısı: {len(groups)}"
+                    text=f"🚀 **[{session_name}] Tur Başladı!**\nTaranan toplam yer: {len(groups)}"
                 )
             except Exception:
                 pass
@@ -298,44 +313,41 @@ async def sender_loop(uid, session_name, context, chat_id):
 
                 if g_id in user_bl or (g_username and g_username in user_bl):
                     skipped_count += 1
+                    detay_listesi.append(f"🚫 Engellendi/Atlandı: {g_title}")
                     continue
 
                 try:
                     await client.send_message(group.id, ad_text)
                     success_count += 1
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"✅ [{session_name}] Gönderildi: **{g_title}**"
-                        )
-                    except Exception:
-                        pass
-
+                    detay_listesi.append(f"✅ Başarılı: {g_title}")
                 except FloodWaitError as exc:
                     log.warning("Telegram bekleme sınırı: %s saniye", exc.seconds)
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"⏳ [{session_name}] Flood Sınırı! {exc.seconds} saniye bekleniyor..."
-                        )
-                    except Exception:
-                        pass
+                    detay_listesi.append(f"⏳ Flood Sınırı ({exc.seconds}sn): {g_title}")
                     await asyncio.sleep(exc.seconds + 5)
                 except Exception as e:
                     fail_count += 1
+                    detay_listesi.append(f"❌ Hatalı: {g_title}")
                     log.exception("Gönderim hatası (%s): %s", g_title, e)
 
                 if group_interval > 0:
                     await asyncio.sleep(group_interval)
 
+            # Detayları hafızaya kaydediyoruz (Butonla istenince bakılacak)
+            tur_detaylari[session_name] = detay_listesi
+
+            # Tur Bitti Raporu ve Detay Butonu
             try:
+                report_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 Detaylı Raporu Gör", callback_data=f"report_{session_name}")]
+                ])
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"📊 **[{session_name}] Tur Tamamlandı**\n\n"
+                    text=f"📊 **[{session_name}] Tur Tamamlandı!**\n\n"
                          f"✅ Başarılı: {success_count}\n"
                          f"❌ Hatalı: {fail_count}\n"
                          f"🚫 Engellenen: {skipped_count}\n\n"
-                         f"⏳ Sıradaki tur için {loop_interval} saniye bekleniyor..."
+                         f"⏳ Sıradaki tur için {loop_interval} saniye bekleniyor...",
+                    reply_markup=report_kb
                 )
             except Exception:
                 pass
@@ -429,13 +441,21 @@ async def button(update, context):
         is_running = task_key in tasks and not tasks[task_key].done()
         status_text = "🟢 Çalışıyor" if is_running else "🔴 Duruyor"
 
+        user = db.get_user(uid) or {}
+        inc_g = user.get("inc_groups", 1)
+        inc_c = user.get("inc_channels", 1)
+
         kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("▶ Bu Hesabı Başlat", callback_data=f"start_{session_name}"),
-                InlineKeyboardButton("⏹ Bu Hesabı Durdur", callback_data=f"stop_{session_name}")
+                InlineKeyboardButton("▶ Başlat", callback_data=f"start_{session_name}"),
+                InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_{session_name}")
             ],
             [
-                InlineKeyboardButton("❌ Bu Hesabı Sil / Çıkar", callback_data=f"del_{session_name}")
+                InlineKeyboardButton(f"👥 Gruplar: {'✅' if inc_g else '❌'}", callback_data=f"toggle_g_{session_name}"),
+                InlineKeyboardButton(f"📢 Kanallar: {'✅' if inc_c else '❌'}", callback_data=f"toggle_c_{session_name}")
+            ],
+            [
+                InlineKeyboardButton("❌ Bu Hesabı Sil", callback_data=f"del_{session_name}")
             ],
             [
                 InlineKeyboardButton("⬅ Hesaplara Dön", callback_data="accounts")
@@ -444,10 +464,34 @@ async def button(update, context):
 
         await q.edit_message_text(
             f"📱 **Hesap Yönetimi:** `{phone_num}`\n\n"
-            f"Durum: {status_text}",
+            f"Durum: {status_text}\n"
+            f"*(Aşağıdan grup veya kanallara mesaj gitmesini açıp kapatabilirsin)*",
             parse_mode="Markdown",
             reply_markup=kb
         )
+
+    elif action.startswith("toggle_g_"):
+        user = db.get_user(uid) or {}
+        current = user.get("inc_groups", 1)
+        db.set_user(uid, inc_groups=0 if current else 1)
+        session_name = action.replace("toggle_g_", "")
+        await button(update, context) # Menüyü yenile
+
+    elif action.startswith("toggle_c_"):
+        user = db.get_user(uid) or {}
+        current = user.get("inc_channels", 1)
+        db.set_user(uid, inc_channels=0 if current else 1)
+        session_name = action.replace("toggle_c_", "")
+        await button(update, context) # Menüyü yenile
+
+    elif action.startswith("report_"):
+        session_name = action.replace("report_", "")
+        detaylar = tur_detaylari.get(session_name, ["Henüz detay bulunmuyor."])
+        metin = f"📋 **{session_name} Son Tur Detayları**\n\n" + "\n".join(detaylar)
+        if len(metin) > 4000:
+            metin = metin[:3950] + "\n... (Liste çok uzun)"
+        
+        await q.message.reply_text(metin)
 
     elif action.startswith("start_"):
         session_name = action.replace("start_", "")
