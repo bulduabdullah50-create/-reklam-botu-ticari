@@ -55,7 +55,8 @@ def get_keyboard(uid):
         ],
         [
             InlineKeyboardButton("📩 Reklam Seç", callback_data="ad"),
-            InlineKeyboardButton("⏱ Zaman Ayarı", callback_data="time"),
+            InlineKeyboardButton("⏱ Grup Aralığı", callback_data="time_group"),
+            InlineKeyboardButton("⏳ Tur Süresi", callback_data="time_loop"),
         ],
         [
             InlineKeyboardButton("▶ Başlat", callback_data="start_send"),
@@ -79,6 +80,13 @@ def get_keyboard(uid):
         ])
 
     return InlineKeyboardMarkup(rows)
+
+
+def sub_menu_keyboard():
+    """Alt menülerde yanlış tıklamaya karşı geri dönüş tuşu"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")]
+    ])
 
 
 def admin_keyboard():
@@ -157,13 +165,19 @@ async def start_sender(uid, message):
         return
 
     try:
-        dialogs = await client.get_dialogs()
+        dialogs = await client.get_dialogs(limit=100)
         groups = [d for d in dialogs if d.is_group or d.is_supergroup]
         
+        if not groups:
+            await message.reply_text("❌ Telegram hesabının üye olduğu hiçbir grup bulunamadı.")
+            return
+
         for g in groups:
             db.approve_group(uid, g.id, g.title or str(g.id), uid)
     except Exception:
         log.exception("Gruplar otomatik senkronize edilirken hata oluştu")
+        await message.reply_text("❌ Gruplar taranırken bir hata oluştu.")
+        return
 
     approved_groups = db.groups_for(uid)
 
@@ -211,6 +225,9 @@ async def sender_loop(uid):
                 break
 
             groups = db.groups_for(uid)
+            
+            loop_interval = user.get("loop_interval_seconds", 240)
+            group_interval = user.get("interval_seconds", 3)
 
             for group in groups:
                 user = db.get_user(uid)
@@ -234,14 +251,16 @@ async def sender_loop(uid):
                         uid, group["chat_id"]
                     )
 
-                await asyncio.sleep(3)
+                if group_interval > 0:
+                    await asyncio.sleep(group_interval)
 
             user = db.get_user(uid)
 
             if not user or not user["enabled"]:
                 break
 
-            await asyncio.sleep(max(900, int(user["interval_seconds"])))
+            if loop_interval > 0:
+                await asyncio.sleep(loop_interval)
 
     except asyncio.CancelledError:
         raise
@@ -283,7 +302,8 @@ async def button(update, context):
             "➕ HESAP EKLE\n\n"
             "Telefon numaranı ülke koduyla gönder.\n"
             "Örnek: +905xxxxxxxxx\n\n"
-            "Doğrulama kodunu ve şifreni kimseyle paylaşma."
+            "Doğrulama kodunu ve şifreni kimseyle paylaşma.",
+            reply_markup=sub_menu_keyboard()
         )
 
     elif action == "account":
@@ -299,27 +319,35 @@ async def button(update, context):
 
         if not client:
             await q.edit_message_text(
-                "Önce hesap ekle.",
+                "❌ Önce hesap eklemelisin.",
                 reply_markup=get_keyboard(uid)
             )
             return
 
-        dialogs = await client.get_dialogs()
-        groups = [d for d in dialogs if d.is_group or d.is_supergroup]
+        try:
+            await q.edit_message_text("⏳ Gruplar taranıyor, lütfen bekleyin...")
+            dialogs = await client.get_dialogs(limit=100)
+            groups = [d for d in dialogs if d.is_group or d.is_supergroup]
 
-        for g in groups:
-            db.approve_group(uid, g.id, g.title or str(g.id), uid)
+            for g in groups:
+                db.approve_group(uid, g.id, g.title or str(g.id), uid)
 
-        text = "👥 TÜM GRUPLARIN (Otomatik Eklendi)\n\n"
+            text = "👥 TÜM GRUPLARIN (Otomatik Eklendi)\n\n"
 
-        text += "\n".join(
-            f"• {g.name} — {g.id}" for g in groups[:40]
-        ) if groups else "Grup bulunamadı."
+            text += "\n".join(
+                f"• {g.name} — {g.id}" for g in groups[:40]
+            ) if groups else "Grup bulunamadı."
 
-        await q.edit_message_text(
-            text[:3900],
-            reply_markup=get_keyboard(uid)
-        )
+            await q.edit_message_text(
+                text[:3900],
+                reply_markup=get_keyboard(uid)
+            )
+        except Exception:
+            log.exception("Grupları listeleme hatası")
+            await q.edit_message_text(
+                "❌ Gruplar çekilirken bir hata oluştu.",
+                reply_markup=get_keyboard(uid)
+            )
 
     elif action == "ad":
         client = await get_client(uid)
@@ -347,22 +375,38 @@ async def button(update, context):
             reply_markup=get_keyboard(uid)
         )
 
-    elif action == "time":
+    elif action == "time_group":
         user = db.get_user(uid)
-        seconds = user["interval_seconds"] if user else 3600
+        seconds = user["interval_seconds"] if user and "interval_seconds" in user else 3
 
-        context.user_data["flow"] = "interval"
+        context.user_data["flow"] = "interval_group"
 
         await q.edit_message_text(
-            f"⏱ Mevcut süre: {seconds} saniye\n\n"
-            "Yeni süreyi saniye olarak gönder.\n"
-            "Örnek: 3600\n"
-            "Minimum: 900 saniye"
+            f"⏱ Mevcut Grup Aralığı: {seconds} saniye\n\n"
+            "İki grup arasında beklenecek saniyeyi gönder.\n"
+            "Örnek: 3 (İstediğin gibi 0 da yapabilirsin)",
+            reply_markup=sub_menu_keyboard()
+        )
+
+    elif action == "time_loop":
+        user = db.get_user(uid)
+        loop_sec = user["loop_interval_seconds"] if user and "loop_interval_seconds" in user else 240
+
+        context.user_data["flow"] = "interval_loop"
+
+        await q.edit_message_text(
+            f"⏳ Mevcut Tur Süresi: {loop_sec} saniye ({loop_sec // 60} dakika)\n\n"
+            "Tüm gruplara mesaj bittikten sonra döngünün baştan başlaması için bekletilecek süreyi saniye cinsinden gönder.\n"
+            "Örnek: 240 (4 dakika için)",
+            reply_markup=sub_menu_keyboard()
         )
 
     elif action == "redeem":
         context.user_data["flow"] = "redeem"
-        await q.edit_message_text("🔑 KEY kodunu gönder.")
+        await q.edit_message_text(
+            "🔑 KEY kodunu gönder.",
+            reply_markup=sub_menu_keyboard()
+        )
 
     elif action == "start_send":
         await start_sender(uid, q.message)
@@ -378,13 +422,16 @@ async def button(update, context):
         user = db.get_user(uid)
         path = SESSIONS / str(uid)
         connected = Path(str(path) + ".session").exists()
+        grp_int = user.get("interval_seconds", 3) if user else 3
+        loop_int = user.get("loop_interval_seconds", 240) if user else 240
 
         await q.edit_message_text(
             "📊 DURUM\n\n"
             f"Hesap: {'Bağlı' if connected else 'Bağlı değil'}\n"
             f"Hedef grup: {len(db.groups_for(uid))}\n"
             f"Reklam: {'Seçildi' if user['ad_message_id'] else 'Seçilmedi'}\n"
-            f"Aralık: {user['interval_seconds']} saniye\n"
+            f"Grup Aralığı: {grp_int} saniye\n"
+            f"Tur Süresi: {loop_int} saniye\n"
             f"Gönderim: {'Aktif' if user['enabled'] else 'Kapalı'}\n"
             f"Lisans: {'Aktif' if db.license_valid(uid) else 'Aktif değil'}",
             reply_markup=get_keyboard(uid)
@@ -406,7 +453,10 @@ async def button(update, context):
             return
 
         context.user_data["flow"] = "key_days"
-        await q.edit_message_text("KEY süresini gün olarak gönder. Örnek: 30")
+        await q.edit_message_text(
+            "KEY süresini gün olarak gönder. Örnek: 30",
+            reply_markup=sub_menu_keyboard()
+        )
 
     elif action == "key_list":
         if not is_admin(uid):
@@ -546,24 +596,42 @@ async def text_handler(update, context):
                 "Giriş tamamlanamadı."
             )
 
-    elif flow == "interval":
+    elif flow == "interval_group":
         try:
             seconds = int(text)
-
-            if not 900 <= seconds <= 86400:
+            if seconds < 0:
                 raise ValueError
 
             db.set_user(uid, interval_seconds=seconds)
             context.user_data.clear()
 
             await update.effective_message.reply_text(
-                f"✅ Aralık kaydedildi: {seconds} saniye.",
+                f"✅ Grup arası aralık kaydedildi: {seconds} saniye.",
                 reply_markup=get_keyboard(uid)
             )
 
         except ValueError:
             await update.effective_message.reply_text(
-                "900 ile 86400 arasında saniye gir."
+                "Lütfen geçerli bir saniye gir (0 veya daha büyük)."
+            )
+
+    elif flow == "interval_loop":
+        try:
+            seconds = int(text)
+            if seconds < 0:
+                raise ValueError
+
+            db.set_user(uid, loop_interval_seconds=seconds)
+            context.user_data.clear()
+
+            await update.effective_message.reply_text(
+                f"✅ Tur dinlenme süresi kaydedildi: {seconds} saniye.",
+                reply_markup=get_keyboard(uid)
+            )
+
+        except ValueError:
+            await update.effective_message.reply_text(
+                "Lütfen geçerli bir saniye gir (0 veya daha büyük)."
             )
 
     elif flow == "redeem":
@@ -613,35 +681,38 @@ async def aralik(update, context):
 
     if not context.args:
         user = db.get_user(uid)
+        sec = user.get("interval_seconds", 3) if user else 3
         await update.effective_message.reply_text(
-            f"Mevcut aralık: {user['interval_seconds']} saniye\n"
-            "Kullanım: /aralik 3600"
+            f"Mevcut grup aralığı: {sec} saniye\n"
+            "Kullanım: /aralik 3"
         )
         return
 
     try:
         seconds = int(context.args[0])
-
-        if not 900 <= seconds <= 86400:
+        if seconds < 0:
             raise ValueError
 
         db.set_user(uid, interval_seconds=seconds)
 
         await update.effective_message.reply_text(
-            f"Aralık kaydedildi: {seconds} saniye."
+            f"Grup aralığı kaydedildi: {seconds} saniye."
         )
 
     except ValueError:
         await update.effective_message.reply_text(
-            "900–86400 saniye arasında değer gir."
+            "Lütfen 0 veya daha büyük bir saniye değeri gir."
         )
 
 
 async def zaman(update, context):
     user = db.get_user(update.effective_user.id)
+    sec = user.get("interval_seconds", 3) if user else 3
+    loop_sec = user.get("loop_interval_seconds", 240) if user else 240
 
     await update.effective_message.reply_text(
-        f"⏱ Mevcut aralığın: {user['interval_seconds']} saniye."
+        f"⏱ Grup Aralığı: {sec} saniye\n"
+        f"⏳ Tur Süresi: {loop_sec} saniye"
     )
 
 
