@@ -17,7 +17,7 @@ import database as db
 
 app_web = Flask(__name__)
 @app_web.route('/')
-def home_web(): return "Bot aktif ve korumalı modda çalışıyor!"
+def home_web(): return "Bot aktif ve zırhlı modda çalışıyor!"
 def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
@@ -46,7 +46,7 @@ def sub_menu_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅
 def admin_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("➕ KEY Oluştur", callback_data="key_create")], [InlineKeyboardButton("📋 KEY Listesi", callback_data="key_list")], [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]])
 
 async def get_client_by_session_string(session_name, s_string):
-    """Buffer ve uzunluk hatalarını yakalayıp botu çökertmeyen ultra zırhlı yükleyici"""
+    """Bozuk veya eksik session string'lerini yakalayıp botu asla çökertmeyen zırhlı yükleyici"""
     client = clients.get(session_name)
     if client:
         try:
@@ -56,15 +56,14 @@ async def get_client_by_session_string(session_name, s_string):
         except Exception: clients.pop(session_name, None)
 
     try:
-        # Tüm boşlukları, tırnakları ve görünmeyen satır sonlarını tamamen temizle
         clean_string = s_string.strip().strip('"').strip("'").replace("\n", "").replace("\r", "").strip()
         
-        # StringSession uzunluk ve buffer kontrolü (275 bayt hatasını önlemek için)
-        if len(clean_string) < 50:
-            log.error("Oturum string'i çok kısa (%s)", session_name)
+        # Telethon string session uzunluk kontrolü (bozuk stringler için koruma)
+        if len(clean_string) < 100:
+            log.warning("Oturum string'i çok kısa veya geçersiz (%s)", session_name)
             return None
 
-        client = TelegramClient(StringSession(clean_string), API_ID, API_HASH, connection_retries=3, auto_reconnect=True, timeout=30)
+        client = TelegramClient(StringSession(clean_string), API_ID, API_HASH, connection_retries=2, auto_reconnect=True, timeout=20)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
@@ -72,7 +71,7 @@ async def get_client_by_session_string(session_name, s_string):
         clients[session_name] = client
         return client
     except Exception as e:
-        log.warning("Oturum yüklenirken hata yakalandı (%s): %s", session_name, e)
+        log.warning("Oturum çözülemedi (Render env string'i eksik/bozuk olabilir) [%s]: %s", session_name, e)
         return None
 
 async def show_home(update, context):
@@ -108,7 +107,6 @@ async def sender_loop(uid, context, chat_id):
             if not has_valid_access(uid): break
             user = db.get_user(uid)
             
-            # Render Environment değişkenlerindeki SESSION_ ile başlayan oturumları çekiyoruz
             active_sessions = []
             for k, v in os.environ.items():
                 if k.startswith("SESSION_") and v and len(v.strip()) > 20:
@@ -128,8 +126,7 @@ async def sender_loop(uid, context, chat_id):
                 
                 client = await get_client_by_session_string(s_name, s_string)
                 if not client:
-                    try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' oturumu yüklenemedi! Render environment üzerindeki string'i eksik veya tırnaklı eklemiş olabilirsin.")
-                    except Exception: pass
+                    # Bozuk session için kullanıcıyı boğmamak adına log düşüp es geçiyoruz
                     continue
 
                 try:
