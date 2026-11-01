@@ -11,7 +11,7 @@ import database as db
 
 app_web = Flask(__name__)
 @app_web.route('/')
-def home_web(): return "Bot aktif ve çalışıyor! Kalıcı veritabanı motoru devrede."
+def home_web(): return "Bot aktif ve çalışıyor! Çelik zırhlı çoklu hesap motoru devrede."
 def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
@@ -48,13 +48,14 @@ async def get_client_by_name(session_name):
             else: clients.pop(session_name, None)
         except Exception: clients.pop(session_name, None)
 
-    # Veritabanından string session alıyoruz
-    conn_rows = db.get_user_sessions_db(int(session_name.split("_")[0]))
+    uid_str = session_name.split("_")[0]
+    if not uid_str.isdigit(): return None
+    conn_rows = db.get_user_sessions_db(int(uid_str))
     s_string = next((row[1] for row in conn_rows if row[0] == session_name), None)
     if not s_string: return None
 
     try:
-        client = TelegramClient(StringSession(s_string), API_ID, API_HASH, connection_retries=5, auto_reconnect=True, timeout=30)
+        client = TelegramClient(StringSession(s_string), API_ID, API_HASH, connection_retries=10, auto_reconnect=True, timeout=45)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
@@ -62,7 +63,7 @@ async def get_client_by_name(session_name):
         clients[session_name] = client
         return client
     except Exception:
-        log.exception("Client yükleme hatası: %s", session_name)
+        log.exception("Client yükleme kritik hatası: %s", session_name)
         return None
 
 async def show_home(update, context):
@@ -89,26 +90,37 @@ async def start_sender(uid, session_name, message_obj, context):
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!**")
+    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Süreler veritabanından senkronize)")
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
     while True:
         try:
             if not has_valid_access(uid): break
+            
+            # Her döngü başında veritabanından güncel ayarları taze çekiyoruz ki süreler ezilmesin
             user = db.get_user(uid)
             db_sessions = db.get_user_sessions_db(uid)
             if not db_sessions:
                 await asyncio.sleep(15)
                 continue
 
-            loop_interval = user.get("loop_interval_seconds", 240) if user else 240
-            group_interval = user.get("interval_seconds", 3) if user else 3
+            loop_interval = user.get("loop_interval_seconds", 240) if user and user.get("loop_interval_seconds") is not None else 240
+            group_interval = user.get("interval_seconds", 3) if user and user.get("interval_seconds") is not None else 3
 
             for s_name, _ in db_sessions:
                 if task_key not in tasks: break
-                client = await get_client_by_name(s_name)
-                if not client: continue
+                
+                client = None
+                for attempt in range(3):
+                    client = await get_client_by_name(s_name)
+                    if client: break
+                    await asyncio.sleep(3)
+                
+                if not client:
+                    log.warning("Hesap yüklenemedi, atlanıyor: %s", s_name)
+                    continue
+
                 try:
                     if not client.is_connected(): await client.connect()
                     messages = await client.get_messages("me", limit=1)
@@ -119,7 +131,7 @@ async def sender_loop(uid, context, chat_id):
                         continue
                     source_msg = messages[0]
                 except Exception as e:
-                    log.exception("Kayıtlı mesaj alınamadı: %s", e)
+                    log.exception("Kayıtlı mesaj alınamadı (%s): %s", s_name, e)
                     try: await client.disconnect()
                     except Exception: pass
                     continue
@@ -140,7 +152,7 @@ async def sender_loop(uid, context, chat_id):
                         for d in dialogs:
                             if d.is_group or d.is_channel: groups.append(d)
                 except Exception as e:
-                    log.exception("Gruplar çekilirken hata: %s", e)
+                    log.exception("Gruplar çekilirken hata (%s): %s", s_name, e)
                     try: await client.disconnect()
                     except Exception: pass
                     continue
@@ -168,6 +180,7 @@ async def sender_loop(uid, context, chat_id):
                         success_count += 1
                         detay_listesi.append(f"✅ Başarılı: {g_title}")
                     except FloodWaitError as exc:
+                        log.warning("Flood sınırı yakalandı: %s saniye bekleniyor", exc.seconds)
                         detay_listesi.append(f"⏳ Flood Sınırı ({exc.seconds}sn): {g_title}")
                         await asyncio.sleep(exc.seconds + 5)
                     except Exception as e:
@@ -186,14 +199,21 @@ async def sender_loop(uid, context, chat_id):
                 except Exception: pass
                 await asyncio.sleep(5)
 
+            # Döngü bitiminde veritabanından en güncel tur süresini tekrar okuyoruz
+            fresh_user = db.get_user(uid)
+            current_loop_interval = fresh_user.get("loop_interval_seconds", 240) if fresh_user and fresh_user.get("loop_interval_seconds") is not None else 240
+
             try:
-                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Sıradaki genel tur döngüsü için {loop_interval} saniye bekleniyor...")
+                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Sıradaki genel tur döngüsü için {current_loop_interval} saniye bekleniyor...")
             except Exception: pass
-            if loop_interval > 0: await asyncio.sleep(loop_interval)
-        except asyncio.CancelledError: break
+            if current_loop_interval > 0: await asyncio.sleep(current_loop_interval)
+
+        except asyncio.CancelledError:
+            break
         except Exception as e:
-            log.exception("Döngü hatası: %s", e)
-            await asyncio.sleep(15)
+            log.exception("Döngüde beklenmeyen hata yakalandı, sistem 10 saniye sonra kendini toparlayacak: %s", e)
+            await asyncio.sleep(10)
+            
     tasks.pop(task_key, None)
 
 async def stop_sender(uid, session_name, chat_id, context):
@@ -267,10 +287,10 @@ async def button(update, context):
         await q.edit_message_text("🚫 GENEL GRUP ENGELLEME\nTüm hesaplarda engellenecek grubun linkini veya kullanıcı adını gönder.", reply_markup=sub_menu_keyboard())
     elif action == "time_group":
         context.user_data["flow"] = "interval_group"
-        await q.edit_message_text(f"⏱ Grup Aralığı: {(db.get_user(uid) or {}).get('interval_seconds', 3)} saniye\Yeni saniyeyi gönder:", reply_markup=sub_menu_keyboard())
+        await q.edit_message_text(f"⏱ Grup Aralığı: {(db.get_user(uid) or {}).get('interval_seconds', 3)} saniye\nYeni saniyeyi gönder:", reply_markup=sub_menu_keyboard())
     elif action == "time_loop":
         context.user_data["flow"] = "interval_loop"
-        await q.edit_message_text(f"⏳ Tur Süresi: {(db.get_user(uid) or {}).get('loop_interval_seconds', 240)} saniye\Yeni süreyi saniye olarak gönder:", reply_markup=sub_menu_keyboard())
+        await q.edit_message_text(f"⏳ Tur Süresi: {(db.get_user(uid) or {}).get('loop_interval_seconds', 240)} saniye\nYeni süreyi saniye olarak gönder:", reply_markup=sub_menu_keyboard())
     elif action == "redeem":
         context.user_data["flow"] = "redeem"
         await q.edit_message_text("🔑 KEY kodunu gönder.", reply_markup=sub_menu_keyboard())
@@ -303,7 +323,7 @@ async def text_handler(update, context):
             await update.effective_message.reply_text("Telefon numaranı +ülke koduyla gönder.")
             return
         session_name = f"{uid}_{text}"
-        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=5, auto_reconnect=True)
+        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=10, auto_reconnect=True)
         await client.connect()
         try:
             sent = await client.send_code_request(text)
@@ -322,8 +342,8 @@ async def text_handler(update, context):
         try:
             await item["client"].sign_in(phone=item["phone"], code=text, phone_code_hash=item["hash"])
             s_name = item["session_name"]
-            s_string = item["client"].session.save() # Oturumu stringe çeviriyoruz
-            db.save_session_db(uid, s_name, s_string) # Veritabanına kalıcı kaydediyoruz
+            s_string = item["client"].session.save()
+            db.save_session_db(uid, s_name, s_string)
             clients[s_name] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
