@@ -1,270 +1,143 @@
-
 import sqlite3
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 
 DB_PATH = Path("data/bot.db")
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-
-def connect():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
-
 
 def init_db():
-    with connect() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                ad_message_id INTEGER,
-                interval_seconds INTEGER NOT NULL DEFAULT 3600,
-                enabled INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT
-            )
-        """)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Kullanıcılar tablosu
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            uid INTEGER PRIMARY KEY,
+            username TEXT,
+            inc_groups INTEGER DEFAULT 1,
+            inc_channels INTEGER DEFAULT 1,
+            interval_seconds INTEGER DEFAULT 3,
+            loop_interval_seconds INTEGER DEFAULT 240,
+            license_expires TIMESTAMP
+        )
+    """)
+    
+    # Lisans / KEY tablosu
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS licenses (
+            code TEXT PRIMARY KEY,
+            duration_days INTEGER,
+            is_used INTEGER DEFAULT 0,
+            used_by INTEGER
+        )
+    """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS approved_groups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                chat_id INTEGER NOT NULL,
-                title TEXT,
-                approved_by INTEGER,
-                created_at TEXT,
-                UNIQUE(user_id, chat_id)
-            )
-        """)
+    # --- KESİN ÇÖZÜM: Session'ları kalıcı veritabanında saklıyoruz ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            uid INTEGER,
+            session_name TEXT PRIMARY KEY,
+            session_string TEXT
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS licenses (
-                code TEXT PRIMARY KEY,
-                duration_days INTEGER NOT NULL,
-                is_used INTEGER NOT NULL DEFAULT 0,
-                used_by INTEGER,
-                created_at TEXT,
-                expires_at TEXT
-            )
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_groups_user
-            ON approved_groups(user_id)
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_licenses_user
-            ON licenses(used_by)
-        """)
-
-        conn.commit()
-
-
-def ensure_user(user_id, username=None):
-    now = datetime.now(timezone.utc).isoformat()
-
-    with connect() as conn:
-        conn.execute("""
-            INSERT INTO users (user_id, username, created_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = COALESCE(excluded.username, users.username)
-        """, (int(user_id), username, now))
-
-        conn.commit()
-
-
-def get_user(user_id):
-    ensure_user(user_id)
-
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM users WHERE user_id = ?",
-            (int(user_id),)
-        ).fetchone()
-
+def get_user(uid):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE uid = ?", (uid,))
+    row = cursor.fetchone()
+    conn.close()
     return dict(row) if row else None
 
+def ensure_user(uid, username):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (uid, username) VALUES (?, ?)", (uid, username))
+    conn.commit()
+    conn.close()
 
-def set_user(user_id, **kwargs):
-    allowed = {
-        "username",
-        "ad_message_id",
-        "interval_seconds",
-        "enabled",
-    }
+def set_user(uid, **kwargs):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    for key, val in kwargs.items():
+        cursor.execute(f"UPDATE users SET {key} = ? WHERE uid = ?", (val, uid))
+    conn.commit()
+    conn.close()
 
-    values = {
-        key: value
-        for key, value in kwargs.items()
-        if key in allowed
-    }
+def license_valid(uid):
+    if int(uid) == 7824143216: # Admin kontrolü için
+        return True
+    user = get_user(uid)
+    if not user or not user.get("license_expires"):
+        return False
+    from datetime import datetime
+    exp = datetime.fromisoformat(user["license_expires"])
+    return exp > datetime.now()
 
-    if not values:
-        return
-
-    ensure_user(user_id)
-
-    columns = ", ".join(f"{key} = ?" for key in values)
-    params = list(values.values()) + [int(user_id)]
-
-    with connect() as conn:
-        conn.execute(
-            f"UPDATE users SET {columns} WHERE user_id = ?",
-            params
-        )
-        conn.commit()
-
-
-def approve_group(user_id, chat_id, title, approved_by=None):
-    ensure_user(user_id)
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    with connect() as conn:
-        conn.execute("""
-            INSERT INTO approved_groups
-                (user_id, chat_id, title, approved_by, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, chat_id) DO UPDATE SET
-                title = excluded.title,
-                approved_by = excluded.approved_by
-        """, (
-            int(user_id),
-            int(chat_id),
-            str(title),
-            approved_by,
-            now
-        ))
-
-        conn.commit()
-
-
-def remove_group(user_id, chat_id):
-    with connect() as conn:
-        conn.execute("""
-            DELETE FROM approved_groups
-            WHERE user_id = ? AND chat_id = ?
-        """, (int(user_id), int(chat_id)))
-
-        conn.commit()
-
-
-def groups_for(user_id):
-    with connect() as conn:
-        rows = conn.execute("""
-            SELECT chat_id, title, approved_by, created_at
-            FROM approved_groups
-            WHERE user_id = ?
-            ORDER BY title
-        """, (int(user_id),)).fetchall()
-
-    return [dict(row) for row in rows]
-
-
-def create_license(code, duration_days):
-    duration_days = int(duration_days)
-
-    if duration_days < 1:
-        raise ValueError("Lisans süresi en az 1 gün olmalı.")
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    with connect() as conn:
-        conn.execute("""
-            INSERT INTO licenses
-                (code, duration_days, is_used, created_at)
-            VALUES (?, ?, 0, ?)
-        """, (str(code), duration_days, now))
-
-        conn.commit()
-
+def create_license(code, days):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO licenses (code, duration_days, is_used) VALUES (?, ?, 0)", (code, days))
+    conn.commit()
+    conn.close()
 
 def list_licenses():
-    with connect() as conn:
-        rows = conn.execute("""
-            SELECT code, duration_days, is_used, used_by,
-                   created_at, expires_at
-            FROM licenses
-            ORDER BY created_at DESC
-            LIMIT 100
-        """).fetchall()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM licenses")
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
 
-    return [dict(row) for row in rows]
+def use_license(uid, code):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM licenses WHERE code = ? AND is_used = 0", (code,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False, "Geçersiz veya daha önce kullanılmış KEY!"
+    
+    days = row[1]
+    cursor.execute("UPDATE licenses SET is_used = 1, used_by = ? WHERE code = ?", (uid, code))
+    
+    user = get_user(uid)
+    from datetime import datetime, timedelta
+    base = datetime.now()
+    if user and user.get("license_expires"):
+        current_exp = datetime.fromisoformat(user["license_expires"])
+        if current_exp > base:
+            base = current_exp
+            
+    new_exp = (base + timedelta(days=days)).isoformat()
+    cursor.execute("UPDATE users SET license_expires = ? WHERE uid = ?", (new_exp, uid))
+    conn.commit()
+    conn.close()
+    return True, f"KEY başarıyla aktif edildi! Süre: {days} gün uzatıldı."
 
+# --- Session Veritabanı Fonksiyonları ---
+def save_session_db(uid, session_name, session_string):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO sessions (uid, session_name, session_string) VALUES (?, ?, ?)", (uid, session_name, session_string))
+    conn.commit()
+    conn.close()
 
-def use_license(user_id, code):
-    user_id = int(user_id)
-    code = str(code).strip().upper()
-    now = datetime.now(timezone.utc)
+def get_user_sessions_db(uid):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_name, session_string FROM sessions WHERE uid = ?", (uid,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
-    ensure_user(user_id)
-
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-
-        license_row = conn.execute("""
-            SELECT * FROM licenses
-            WHERE code = ?
-        """, (code,)).fetchone()
-
-        if not license_row:
-            conn.rollback()
-            return False, "KEY bulunamadı."
-
-        if license_row["is_used"]:
-            conn.rollback()
-            return False, "Bu KEY daha önce kullanılmış."
-
-        expires = now + timedelta(
-            days=int(license_row["duration_days"])
-        )
-
-        conn.execute("""
-            UPDATE licenses
-            SET is_used = 1,
-                used_by = ?,
-                expires_at = ?
-            WHERE code = ? AND is_used = 0
-        """, (
-            user_id,
-            expires.isoformat(),
-            code
-        ))
-
-        conn.commit()
-
-    return True, (
-        f"{license_row['duration_days']} günlük lisans aktifleştirildi. "
-        f"Bitiş: {expires.strftime('%d.%m.%Y %H:%M')} UTC"
-    )
-
-
-def license_valid(user_id):
-    now = datetime.now(timezone.utc)
-
-    with connect() as conn:
-        row = conn.execute("""
-            SELECT expires_at
-            FROM licenses
-            WHERE used_by = ?
-              AND is_used = 1
-            ORDER BY expires_at DESC
-            LIMIT 1
-        """, (int(user_id),)).fetchone()
-
-    if not row or not row["expires_at"]:
-        return False
-
-    try:
-        expires = datetime.fromisoformat(row["expires_at"])
-
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-
-        return now < expires
-
-    except (ValueError, TypeError):
-        return False
+def delete_session_db(session_name):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM sessions WHERE session_name = ?", (session_name,))
+    conn.commit()
+    conn.close()
