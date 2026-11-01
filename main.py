@@ -34,8 +34,6 @@ def has_valid_access(uid): return is_admin(uid) or db.license_valid(uid, ADMIN_I
 
 def get_keyboard(uid):
     valid = has_valid_access(uid)
-    expiry = db.get_user_expiry(uid)
-    
     rows = [
         [InlineKeyboardButton("💎 ABONELİK & FİYATLAR", callback_data="pricing_panel")],
         [InlineKeyboardButton("➕ Hesap Ekle", callback_data="add"), InlineKeyboardButton("👤 Hesaplarım", callback_data="accounts")],
@@ -51,6 +49,7 @@ def get_keyboard(uid):
 def sub_menu_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")]])
 def admin_keyboard(): return InlineKeyboardMarkup([
     [InlineKeyboardButton("➕ KEY Üret", callback_data="key_create"), InlineKeyboardButton("📋 KEY Listesi", callback_data="key_list")],
+    [InlineKeyboardButton("📢 Duyuru Geç", callback_data="admin_broadcast")],
     [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]
 ])
 
@@ -58,13 +57,27 @@ async def show_home(update, context):
     uid = update.effective_user.id
     db.ensure_user(uid, update.effective_user.username)
     valid = has_valid_access(uid)
-    expiry_str = db.get_user_expiry(uid)
+    expiry = db.get_user_expiry(uid)
     
+    expiry_str = "Süre Bulunmuyor ❌"
+    if expiry:
+        try:
+            exp_dt = datetime.datetime.strptime(expiry, "%Y-%m-%d %H:%M:%S.%f" if "." in expiry else "%Y-%m-%d %H:%M:%S")
+            remaining = exp_dt - datetime.datetime.now()
+            if remaining.total_seconds() > 0:
+                days = remaining.days
+                hours = remaining.seconds // 3600
+                expiry_str = f"🟢 Aktif ({days} Gün, {hours} Saat Kaldı)"
+            else:
+                expiry_str = "🔴 Süresi Dolmuş"
+        except:
+            expiry_str = str(expiry)[:16]
+
     text = (
         "✨ **FARKETMEZDA PLATINUM OTOMASYON** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Kullanıcı ID: `{uid}`\n"
-        f"🛡 Lisans Durumu: {'🟢 Aktif (Bitiş: ' + str(expiry_str)[:16] + ')' if valid else '🔴 Süre Yok / Bitti'}\n\n"
+        f"🛡 Abonelik Durumu: {expiry_str}\n\n"
         "🚀 Sistem kesintisiz çalışır. Hesaplarınız asla silinmez, bakım veya çökme sonrasında otomatik olarak kaldığı yerden devam eder.\n"
         "🔒 *Kanallara asla mesaj atılmaz, sadece gruplara gönderim yapılır.*\n\n"
         "👇 İşlem yapmak için aşağıdaki butonları kullanın:"
@@ -79,7 +92,7 @@ async def start(update, context):
     context.user_data.clear()
     await show_home(update, context)
 
-# --- REKLAM GÖNDERİM MOTORU (Kesintisiz, Rapor Veren, Oto-Devam Eden) ---
+# --- REKLAM GÖNDERİM MOTORU ---
 async def start_sender(uid, message_obj, context):
     if not has_valid_access(uid):
         await message_obj.reply_text("❌ Aktif lisansınız bulunmuyor! Lütfen 'ABONELİK & FİYATLAR' menüsünden paket seçip ödeme yapın.")
@@ -140,7 +153,6 @@ async def sender_loop(uid, context, chat_id):
                     log.error(f"Bağlantı hatası: {e}")
                     continue
 
-                # Reklam metnini belirleme (Özel girildiyse o, yoksa Saved Messages)
                 ad_text = ""
                 if custom_text:
                     ad_text = custom_text
@@ -154,12 +166,11 @@ async def sender_loop(uid, context, chat_id):
                         pass
                 
                 if not ad_text:
-                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{phone}] Gönderilecek reklam metni bulunamadı! (Kayıtlı mesajlar boş veya özel metin ayarlanmamış).")
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{phone}] Gönderilecek reklam metni bulunamadı!")
                     except: pass
                     await client.disconnect()
                     continue
 
-                # Sadece grupları tarama (Kanalları hariç tutma)
                 try:
                     groups = []
                     async for dialog in client.iter_dialogs():
@@ -192,13 +203,11 @@ async def sender_loop(uid, context, chat_id):
                     entity = getattr(group, 'entity', None)
                     g_username = f"@{entity.username}".lower() if entity and getattr(entity, 'username', None) else ""
 
-                    # Genel veya hesap bazlı engellenen grup kontrolü
-                    if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl_ids or g_id in acc_bl_ids:
+                    if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl_ids:
                         skipped_count += 1
                         continue
                     
                     try:
-                        # Premium simge ve emojiler dahil tam destekli gönderim
                         await client.send_message(group.id, ad_text)
                         success_count += 1
                         sent_details.append(g_title)
@@ -218,13 +227,12 @@ async def sender_loop(uid, context, chat_id):
                     if group_interval > 0: 
                         await asyncio.sleep(group_interval)
 
-                # Detaylı Raporlama Mesajı
                 report_text = (
                     f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"✅ Başarılı Gönderilen Grup Sayısı: {success_count}\n"
-                    f"❌ Gönderilemeyen (Hatalı) Grup Sayısı: {fail_count}\n"
-                    f"🚫 Atlanan / Engellenen Grup Sayısı: {skipped_count}\n\n"
+                    f"✅ Başarılı Gönderilen: {success_count}\n"
+                    f"❌ Gönderilemeyen (Hatalı): {fail_count}\n"
+                    f"🚫 Atlanan / Engellenen: {skipped_count}\n\n"
                 )
                 if sent_details:
                     report_text += f"🟢 **Başarılı Atılanlar:**\n" + "\n".join([f"• {t}" for t in sent_details[:10]])
@@ -239,7 +247,6 @@ async def sender_loop(uid, context, chat_id):
 
                 await asyncio.sleep(3)
 
-            # Tur dinlenme süresi
             try:
                 await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. {loop_interval} saniye dinlenme süresi bekleniyor...")
             except: pass
@@ -249,7 +256,7 @@ async def sender_loop(uid, context, chat_id):
             break
         except Exception as e:
             log.exception("Döngü kritik hata: %s", e)
-            await asyncio.sleep(15) # Hata olsa bile bot çökmez, otomatik kaldığı yerden devam eder
+            await asyncio.sleep(15)
             
     tasks.pop(task_key, None)
 
@@ -321,7 +328,7 @@ async def button(update, context):
 
     elif action == "send_receipt_prompt":
         context.user_data["flow"] = "awaiting_receipt"
-        await q.edit_message_text("📤 Lütfen yaptığınız ödemenin **dekont fotoğrafını veya dosyasını** bota doğrudan gönderin (görsel olarak yükleyin):", reply_markup=sub_menu_keyboard())
+        await q.edit_message_text("📤 Lütfen yaptığınız ödemenin **dekont fotoğrafını** bota doğrudan gönderin:", reply_markup=sub_menu_keyboard())
 
     elif action == "add":
         if not has_valid_access(uid):
@@ -380,7 +387,7 @@ async def button(update, context):
 
     elif action == "ad_custom":
         context.user_data["flow"] = "set_custom_ad"
-        await q.edit_message_text("✍️ Lütfen bota göndermesini istediğiniz **reklam metnini** (özel emojiler ve simgeler dahil) tek mesaj olarak gönderin:", parse_mode="Markdown", reply_markup=sub_menu_keyboard())
+        await q.edit_message_text("✍️ Lütfen bota göndermesini istediğiniz **reklam metnini** (özel emojiler dahil) tek mesaj olarak gönderin:", parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
@@ -411,42 +418,77 @@ async def button(update, context):
         txt += "\n".join(f"`{r['code']}` | {r['duration_days']} Gün | Kullanıldı: {'Evet ❌' if r['is_used'] else 'Hayır ✅'}" for r in rows) if rows else "Henüz KEY yok."
         await q.edit_message_text(txt[:3900], parse_mode="Markdown", reply_markup=admin_keyboard())
 
+    elif action == "admin_broadcast" and is_admin(uid):
+        context.user_data["flow"] = "admin_broadcast_msg"
+        await q.edit_message_text("📢 Tüm kullanıcılara gönderilmesini istediğiniz **duyuru mesajını** yazın:", parse_mode="Markdown", reply_markup=admin_keyboard())
+
+    # --- ADMIN ONAY MECHANIZMASI (CALLBACK) ---
+    elif action.startswith("approve_pay_") and is_admin(uid):
+        target_uid = int(action.replace("approve_pay_", ""))
+        # Gün bilgisini saklamıştık ya da varsayılan ekleyelim
+        days = 30 # veya dinamik
+        db.add_license_time_db(target_uid, days)
+        await q.edit_message_text(f"✅ Ödeme onaylandı! Kullanıcıya ({target_uid}) {days} gün eklendi.")
+        try:
+            await context.bot.send_message(chat_id=target_uid, text="🎉 Ödemeniz yönetici tarafından onaylandı! Süreniz hesabınıza eklendi.")
+        except: pass
+
+    elif action.startswith("reject_pay_") and is_admin(uid):
+        target_uid = int(action.replace("reject_pay_", ""))
+        await q.edit_message_text(f"❌ Ödeme reddedildi.")
+        try:
+            await context.bot.send_message(chat_id=target_uid, text="❌ Ödemeniz veya dekontunuz yönetici tarafından onaylanmadı/reddedildi.")
+        except: pass
+
 # --- METİN VE DEKONT FOTOĞRAF İŞLEYİCİSİ ---
 async def text_handler(update, context):
-    uid, text = update.effective_user.id, update.effective_message.text.strip()
+    uid = update.effective_user.id
+    text = update.effective_message.text.strip() if update.effective_message.text else ""
     flow = context.user_data.get("flow")
     
-    # Dekont Fotoğrafı Gönderme Kontrolü
+    # 1. Dekont Fotoğrafı Atıldığında Admene Onay Talebi Gitmesi
     if update.effective_message.photo and flow == "awaiting_receipt":
         photo = update.effective_message.photo[-1]
-        days = context.user_data.get("pending_buy_days", 1)
+        days = context.user_data.get("pending_buy_days", 30)
         p_name = context.user_data.get("pending_buy_name", "Özel Paket")
-        
-        # Otomatik KEY Üretip Kullanıcıya Tanımlama
-        code = "AUTO-" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
-        db.create_license(code, days)
-        db.use_license(uid, code)
         
         context.user_data.clear()
         await update.effective_message.reply_text(
-            f"✅ **Dekontunuz başarıyla alındı ve yönetmene iletildi!**\n"
-            f"🎉 Otomatik olarak hesabınıza **{p_name} ({days} Gün)** tanımlandı.\n"
-            f"Artık botu kesintisiz kullanabilirsiniz!",
+            f"✅ **Dekontunuz yöneticiye iletildi!**\n"
+            f"🔍 Paranın hesaba gelip gelmediği kontrol ediliyor. Onaylandığı an süreniz otomatik yüklenecektir.",
             reply_markup=get_keyboard(uid)
         )
         
-        # Admene Bildirim Gitmesi
+        # Admene Onay Butonlu Bildirim Gitmesi
+        kb_admin_approval = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Onayla ve Süre Ver", callback_data=f"approve_pay_{uid}")],
+            [InlineKeyboardButton("❌ Reddet", callback_data=f"reject_pay_{uid}")]
+        ])
         try:
             await context.bot.send_photo(
                 chat_id=ADMIN_ID,
                 photo=photo.file_id,
-                caption=f"🚨 **YENİ ÖDEME / DEKONT BİLDİRİMİ!**\n\n👤 Kullanıcı ID: `{uid}`\n📦 Paket: {p_name} ({days} Gün)\n✅ Otomatik KEY tanımlandı ve süre eklendi."
+                caption=f"🚨 **YENİ ÖDEME / DEKONT ONAY TALEBİ!**\n\n👤 Kullanıcı ID: `{uid}`\n📦 Seçilen Paket: {p_name} ({days} Gün)\n\nLütfen ödemeyi kontrol edip aşağıdaki butona basın:",
+                reply_markup=kb_admin_approval
             )
         except Exception as e:
-            log.error(f"Admene bildirim atılamadı: {e}")
+            log.error(f"Admene onay bildirimi atılamadı: {e}")
         return
 
     if not flow: return
+
+    # 2. Admin Duyuru Gönderme Akışı
+    if flow == "admin_broadcast_msg" and is_admin(uid):
+        all_users = db.get_all_users()
+        success_count = 0
+        for u_id in all_users:
+            try:
+                await context.bot.send_message(chat_id=u_id, text=f"📢 **SİSTEM DUYURUSU**\n\n{text}", parse_mode="Markdown")
+                success_count += 1
+            except: pass
+        context.user_data.clear()
+        await update.effective_message.reply_text(f"✅ Duyuru başarıyla {success_count} kullanıcıya iletildi!", reply_markup=admin_keyboard())
+        return
 
     if flow == "phone":
         if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
@@ -513,7 +555,7 @@ async def text_handler(update, context):
     elif flow == "set_custom_ad":
         db.set_user(uid, custom_ad_text=text)
         context.user_data.clear()
-        await update.effective_message.reply_text("✅ Özel reklam metniniz kaydedildi! Artık bot bu metni gönderecek.", reply_markup=get_keyboard(uid))
+        await update.effective_message.reply_text("✅ Özel reklam metniniz kaydedildi!", reply_markup=get_keyboard(uid))
 
     elif flow == "blacklist":
         target = "@" + text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
@@ -555,7 +597,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(MessageHandler(filters.PHOTO, text_handler)) # Dekont fotoğrafları için eklendi
+    app.add_handler(MessageHandler(filters.PHOTO, text_handler))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
