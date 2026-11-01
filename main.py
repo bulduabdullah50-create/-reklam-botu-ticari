@@ -11,7 +11,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 import database as db
 
 app_web = Flask(__name__)
@@ -203,7 +203,7 @@ async def sender_loop(uid, context, chat_id):
                         await asyncio.sleep(group_interval)
 
                 report_text = (
-                    f"📊 **[{phone}] REKLAM TURu TAMAMLANDI**\n"
+                    f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
                     f"✅ Başarılı: {success_count} | ❌ Hatalı: {fail_count} | 🚫 Atlanan: {skipped_count}"
                 )
                 try:
@@ -234,19 +234,25 @@ async def stop_sender(uid, chat_id, context):
         tasks.pop(task_key, None)
     await context.bot.send_message(chat_id=chat_id, text="⏹ **Reklam otomasyonu durduruldu.**")
 
-# Bot Açıldığında Arka Planda Kalan Çalışır Durumdaki Kullanıcıları Otomatik Başlatma (Auto-Resume)
-async def resume_active_users_on_startup(application):
-    await asyncio.sleep(5) # Bot tamamen ayağa kalkana kadar bekle
+# Bot açıldığında çalışan kullanıcıları otomatik başlatma arka plan görevi
+async def resume_active_users_background(application):
+    await asyncio.sleep(5)
     running_users = db.get_all_running_users()
     for uid in running_users:
         if db.license_valid(uid, ADMIN_ID):
             try:
-                tasks[f"{uid}_auto_all_accounts"] = asyncio.create_task(sender_loop(uid, application, uid))
+                class DummyContext:
+                    def __init__(self, bot):
+                        self.bot = bot
+                tasks[f"{uid}_auto_all_accounts"] = asyncio.create_task(sender_loop(uid, DummyContext(application.bot), uid))
                 log.info(f"Kullanıcı {uid} otomatik olarak kaldığı yerden başlatıldı.")
             except Exception as e:
                 log.error(f"Kullanıcı {uid} başlatılamadı: {e}")
         else:
             db.set_user(uid, is_running=0)
+
+async def post_init(application):
+    asyncio.create_task(resume_active_users_background(application))
 
 # --- CALLBACK VE ARAYÜZ YÖNETİMİ ---
 async def button(update, context):
@@ -538,15 +544,11 @@ def main():
     t = Thread(target=run_web)
     t.daemon = True
     t.start()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, text_handler))
-    
-    # Bot açıldığı an aktif kullanıcıları kaldığı yerden otomatik başlatma kancası
-    app.job_queue.run_once(resume_active_users_on_startup, when=3)
-    
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
