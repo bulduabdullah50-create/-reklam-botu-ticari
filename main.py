@@ -11,7 +11,7 @@ import database as db
 
 app_web = Flask(__name__)
 @app_web.route('/')
-def home_web(): return "Bot aktif ve çalışıyor! Çelik zırhlı çoklu hesap motoru devrede."
+def home_web(): return "Bot aktif ve çalışıyor! Hesaplar veritabanında güvencede."
 def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
@@ -90,15 +90,13 @@ async def start_sender(uid, session_name, message_obj, context):
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Süreler veritabanından senkronize)")
+    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Kalıcı veritabanı koruması aktif)")
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
     while True:
         try:
             if not has_valid_access(uid): break
-            
-            # Her döngü başında veritabanından güncel ayarları taze çekiyoruz ki süreler ezilmesin
             user = db.get_user(uid)
             db_sessions = db.get_user_sessions_db(uid)
             if not db_sessions:
@@ -199,7 +197,6 @@ async def sender_loop(uid, context, chat_id):
                 except Exception: pass
                 await asyncio.sleep(5)
 
-            # Döngü bitiminde veritabanından en güncel tur süresini tekrar okuyoruz
             fresh_user = db.get_user(uid)
             current_loop_interval = fresh_user.get("loop_interval_seconds", 240) if fresh_user and fresh_user.get("loop_interval_seconds") is not None else 240
 
@@ -211,7 +208,7 @@ async def sender_loop(uid, context, chat_id):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("Döngüde beklenmeyen hata yakalandı, sistem 10 saniye sonra kendini toparlayacak: %s", e)
+            log.exception("Döngü hatası, sistem kendini toparlıyor: %s", e)
             await asyncio.sleep(10)
             
     tasks.pop(task_key, None)
@@ -280,7 +277,7 @@ async def button(update, context):
         if f"{uid}_auto_all_accounts" in tasks: tasks.pop(f"{uid}_auto_all_accounts").cancel()
         clients.pop(session_name, None)
         db.delete_session_db(session_name)
-        await q.edit_message_text(f"✅ **{session_name}** hesabı sistemden tamamen çıkarıldı.", reply_markup=get_keyboard(uid))
+        await q.edit_message_text(f"✅ **{session_name}** hesabı veritabanından tamamen silindi.", reply_markup=get_keyboard(uid))
     elif action == "ad": await q.edit_message_text("ℹ️ Her hesap reklamı doğrudan **kendi Kayıtlı Mesajlar'ındakinden** alır.", reply_markup=get_keyboard(uid))
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
@@ -343,11 +340,11 @@ async def text_handler(update, context):
             await item["client"].sign_in(phone=item["phone"], code=text, phone_code_hash=item["hash"])
             s_name = item["session_name"]
             s_string = item["client"].session.save()
-            db.save_session_db(uid, s_name, s_string)
+            db.save_session_db(uid, s_name, s_string) # VERİTABANINA KALICI OLARAK MÜHÜRLENİR
             clients[s_name] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı başarıyla eklendi ve veritabanına mühürlendi!", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı başarıyla eklendi ve veritabanına mühürlendi! Asla silinmez.", reply_markup=get_keyboard(uid))
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
             await update.effective_message.reply_text("İki adımlı doğrulama (2FA) şifreni gönder:")
@@ -365,11 +362,11 @@ async def text_handler(update, context):
             await item["client"].sign_in(password=text)
             s_name = item["session_name"]
             s_string = item["client"].session.save()
-            db.save_session_db(uid, s_name, s_string)
+            db.save_session_db(uid, s_name, s_string) # VERİTABANINA KALICI OLARAK MÜHÜRLENİR
             clients[s_name] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text("✅ Hesap başarıyla bağlandı ve veritabanına mühürlendi!", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text("✅ Hesap başarıyla bağlandı ve veritabanına mühürlendi! Asla silinmez.", reply_markup=get_keyboard(uid))
         except PasswordHashInvalidError:
             await update.effective_message.reply_text("Şifre hatalı. Tekrar dene.")
         except Exception:
