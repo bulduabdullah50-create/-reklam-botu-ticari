@@ -1,4 +1,4 @@
-import os, re, asyncio, secrets, string, logging
+import os, re, asyncio, secrets, string, logging, gc
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -11,7 +11,7 @@ import database as db
 
 app_web = Flask(__name__)
 @app_web.route('/')
-def home_web(): return "Bot aktif ve çalışıyor! Hesaplar veritabanında güvencede."
+def home_web(): return "Bot aktif ve çalışıyor! Çevre değişkeni koruması devrede."
 def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
@@ -52,10 +52,12 @@ async def get_client_by_name(session_name):
     if not uid_str.isdigit(): return None
     conn_rows = db.get_user_sessions_db(int(uid_str))
     s_string = next((row[1] for row in conn_rows if row[0] == session_name), None)
+    if not s_string:
+        s_string = os.environ.get(f"SESSION_{session_name}")
     if not s_string: return None
 
     try:
-        client = TelegramClient(StringSession(s_string), API_ID, API_HASH, connection_retries=10, auto_reconnect=True, timeout=45)
+        client = TelegramClient(StringSession(s_string), API_ID, API_HASH, connection_retries=5, auto_reconnect=True, timeout=30)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
@@ -63,7 +65,7 @@ async def get_client_by_name(session_name):
         clients[session_name] = client
         return client
     except Exception:
-        log.exception("Client yükleme kritik hatası: %s", session_name)
+        log.exception("Client yükleme hatası: %s", session_name)
         return None
 
 async def show_home(update, context):
@@ -90,7 +92,7 @@ async def start_sender(uid, session_name, message_obj, context):
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Kalıcı veritabanı koruması aktif)")
+    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (RAM bellek optimizasyonu aktif)")
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
@@ -109,15 +111,8 @@ async def sender_loop(uid, context, chat_id):
             for s_name, _ in db_sessions:
                 if task_key not in tasks: break
                 
-                client = None
-                for attempt in range(3):
-                    client = await get_client_by_name(s_name)
-                    if client: break
-                    await asyncio.sleep(3)
-                
-                if not client:
-                    log.warning("Hesap yüklenemedi, atlanıyor: %s", s_name)
-                    continue
+                client = await get_client_by_name(s_name)
+                if not client: continue
 
                 try:
                     if not client.is_connected(): await client.connect()
@@ -178,7 +173,7 @@ async def sender_loop(uid, context, chat_id):
                         success_count += 1
                         detay_listesi.append(f"✅ Başarılı: {g_title}")
                     except FloodWaitError as exc:
-                        log.warning("Flood sınırı yakalandı: %s saniye bekleniyor", exc.seconds)
+                        log.warning("Flood sınırı: %s sn", exc.seconds)
                         detay_listesi.append(f"⏳ Flood Sınırı ({exc.seconds}sn): {g_title}")
                         await asyncio.sleep(exc.seconds + 5)
                     except Exception as e:
@@ -195,6 +190,10 @@ async def sender_loop(uid, context, chat_id):
                 try:
                     if client.is_connected(): await client.disconnect()
                 except Exception: pass
+                
+                del dialogs
+                del groups
+                gc.collect()
                 await asyncio.sleep(5)
 
             fresh_user = db.get_user(uid)
@@ -203,12 +202,14 @@ async def sender_loop(uid, context, chat_id):
             try:
                 await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Sıradaki genel tur döngüsü için {current_loop_interval} saniye bekleniyor...")
             except Exception: pass
+            
+            gc.collect()
             if current_loop_interval > 0: await asyncio.sleep(current_loop_interval)
 
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("Döngü hatası, sistem kendini toparlıyor: %s", e)
+            log.exception("Döngü hatası: %s", e)
             await asyncio.sleep(10)
             
     tasks.pop(task_key, None)
@@ -277,7 +278,7 @@ async def button(update, context):
         if f"{uid}_auto_all_accounts" in tasks: tasks.pop(f"{uid}_auto_all_accounts").cancel()
         clients.pop(session_name, None)
         db.delete_session_db(session_name)
-        await q.edit_message_text(f"✅ **{session_name}** hesabı veritabanından tamamen silindi.", reply_markup=get_keyboard(uid))
+        await q.edit_message_text(f"✅ **{session_name}** hesabı silindi. (Eğer Render Environment kısmında SESSION_{session_name} ekli ise oradan da kaldırabilirsin.)", reply_markup=get_keyboard(uid))
     elif action == "ad": await q.edit_message_text("ℹ️ Her hesap reklamı doğrudan **kendi Kayıtlı Mesajlar'ındakinden** alır.", reply_markup=get_keyboard(uid))
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
@@ -320,7 +321,7 @@ async def text_handler(update, context):
             await update.effective_message.reply_text("Telefon numaranı +ülke koduyla gönder.")
             return
         session_name = f"{uid}_{text}"
-        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=10, auto_reconnect=True)
+        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=5, auto_reconnect=True)
         await client.connect()
         try:
             sent = await client.send_code_request(text)
@@ -340,11 +341,10 @@ async def text_handler(update, context):
             await item["client"].sign_in(phone=item["phone"], code=text, phone_code_hash=item["hash"])
             s_name = item["session_name"]
             s_string = item["client"].session.save()
-            db.save_session_db(uid, s_name, s_string) # VERİTABANINA KALICI OLARAK MÜHÜRLENİR
             clients[s_name] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı başarıyla eklendi ve veritabanına mühürlendi! Asla silinmez.", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı bağlandı!\n\n🔑 **Kalıcılık için Önemli Not:** Render panelinde **Environment** bölümüne şu bilgiyi ekle:\nKey: `SESSION_{s_name}`\nValue: `{s_string}`", reply_markup=get_keyboard(uid))
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
             await update.effective_message.reply_text("İki adımlı doğrulama (2FA) şifreni gönder:")
@@ -362,11 +362,10 @@ async def text_handler(update, context):
             await item["client"].sign_in(password=text)
             s_name = item["session_name"]
             s_string = item["client"].session.save()
-            db.save_session_db(uid, s_name, s_string) # VERİTABANINA KALICI OLARAK MÜHÜRLENİR
             clients[s_name] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text("✅ Hesap başarıyla bağlandı ve veritabanına mühürlendi! Asla silinmez.", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ Hesap bağlandı!\n\n🔑 **Kalıcılık için Önemli Not:** Render panelinde **Environment** bölümüne ekle:\nKey: `SESSION_{s_name}`\nValue: `{s_string}`", reply_markup=get_keyboard(uid))
         except PasswordHashInvalidError:
             await update.effective_message.reply_text("Şifre hatalı. Tekrar dene.")
         except Exception:
