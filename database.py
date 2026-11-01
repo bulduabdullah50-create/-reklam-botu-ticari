@@ -197,3 +197,11 @@ def get_all_users():
     rows = c.fetchall()
     conn.close()
     return [r["uid"] for r in rows]
+
+def get_all_running_users():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT uid FROM users WHERE is_running = 1")
+    rows = c.fetchall()
+    conn.close()
+    return [r["uid"] for r in rows]
