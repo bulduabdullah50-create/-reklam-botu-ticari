@@ -8,7 +8,6 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Kullanıcılar tablosu
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             uid INTEGER PRIMARY KEY,
@@ -21,7 +20,6 @@ def init_db():
         )
     """)
     
-    # Lisans / KEY tablosu
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS licenses (
             code TEXT PRIMARY KEY,
@@ -31,7 +29,7 @@ def init_db():
         )
     """)
 
-    # --- KESİN ÇÖZÜM: Session'ları kalıcı veritabanında saklıyoruz ---
+    # HESAPLARIN ASLA SİLİNMEMESİ İÇİN KALICI TABLO
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             uid INTEGER,
@@ -68,7 +66,7 @@ def set_user(uid, **kwargs):
     conn.close()
 
 def license_valid(uid):
-    if int(uid) == 7824143216: # Admin kontrolü için
+    if int(uid) == 7824143216: 
         return True
     user = get_user(uid)
     if not user or not user.get("license_expires"):
@@ -119,7 +117,6 @@ def use_license(uid, code):
     conn.close()
     return True, f"KEY başarıyla aktif edildi! Süre: {days} gün uzatıldı."
 
-# --- Session Veritabanı Fonksiyonları ---
 def save_session_db(uid, session_name, session_string):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
