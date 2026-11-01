@@ -5,6 +5,7 @@ import secrets
 import string
 import logging
 import gc
+import base64
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -17,7 +18,7 @@ import database as db
 
 app_web = Flask(__name__)
 @app_web.route('/')
-def home_web(): return "Bot aktif ve çalışıyor! Çevre değişkeni koruması devrede."
+def home_web(): return "Bot aktif ve profesyonel modda çalışıyor!"
 def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +47,7 @@ def sub_menu_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅
 def admin_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("➕ KEY Oluştur", callback_data="key_create")], [InlineKeyboardButton("📋 KEY Listesi", callback_data="key_list")], [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]])
 
 async def get_client_by_session_string(session_name, s_string):
+    """Oturum string'ini struct.error ve bozulmalara karşı kusursuz temizleyen profesyonel yükleyici"""
     client = clients.get(session_name)
     if client:
         try:
@@ -55,15 +57,21 @@ async def get_client_by_session_string(session_name, s_string):
         except Exception: clients.pop(session_name, None)
 
     try:
-        client = TelegramClient(StringSession(s_string), API_ID, API_HASH, connection_retries=5, auto_reconnect=True, timeout=30)
+        # Temizlik ve Padding (eksik karakter) tamamlama mekanizması
+        clean_string = s_string.strip().strip('"').strip("'").strip()
+        padding_needed = len(clean_string) % 4
+        if padding_needed:
+            clean_string += '=' * (4 - padding_needed)
+
+        client = TelegramClient(StringSession(clean_string), API_ID, API_HASH, connection_retries=5, auto_reconnect=True, timeout=30)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
             return None
         clients[session_name] = client
         return client
-    except Exception:
-        log.exception("Client yükleme hatası: %s", session_name)
+    except Exception as e:
+        log.exception("Profesyonel Client yükleme hatası (%s): %s", session_name, e)
         return None
 
 async def show_home(update, context):
@@ -90,7 +98,7 @@ async def start_sender(uid, session_name, message_obj, context):
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Sadece gruplar aktif)")
+    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Profesyonel Mod: Sadece Gruplar)")
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
@@ -99,13 +107,15 @@ async def sender_loop(uid, context, chat_id):
             if not has_valid_access(uid): break
             user = db.get_user(uid)
             
-            # Render Environment değişkenlerindeki SESSION_ ile başlayan tüm oturumları direkt çekiyoruz
+            # Render Environment değişkenlerindeki SESSION_ ile başlayan oturumları çekiyoruz
             active_sessions = []
             for k, v in os.environ.items():
-                if k.startswith("SESSION_"):
+                if k.startswith("SESSION_") and v and len(v.strip()) > 20:
                     active_sessions.append((k, v))
             
             if not active_sessions:
+                try: await context.bot.send_message(chat_id=chat_id, text="❌ Render environment kısmında geçerli SESSION_ bulunamadı!")
+                except Exception: pass
                 await asyncio.sleep(15)
                 continue
 
@@ -116,13 +126,16 @@ async def sender_loop(uid, context, chat_id):
                 if task_key not in tasks: break
                 
                 client = await get_client_by_session_string(s_name, s_string)
-                if not client: continue
+                if not client:
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' oturumu yüklenemedi! Session string hatalı veya süresi dolmuş olabilir.")
+                    except Exception: pass
+                    continue
 
                 try:
                     if not client.is_connected(): await client.connect()
                     messages = await client.get_messages("me", limit=1)
                     if not messages:
-                        try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' hesabının Kayıtlı Mesajlar'ı boş!")
+                        try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' hesabının Kayıtlı Mesajlar'ı boş! Lütfen reklam metni ekle.")
                         except Exception: pass
                         await client.disconnect()
                         continue
@@ -135,7 +148,7 @@ async def sender_loop(uid, context, chat_id):
 
                 ad_text = getattr(source_msg, 'text', '') or getattr(source_msg, 'message', '') or "Reklam İçeriği"
                 
-                # --- GRUP FİLTRELEME (KANALLAR KESİNLİKLE KAPALI) ---
+                # --- PROFESYONEL GRUP FİLTRELEME (KANALLAR KESİNLİKLE KAPALI) ---
                 try:
                     groups = []
                     async for dialog in client.iter_dialogs():
@@ -148,7 +161,7 @@ async def sender_loop(uid, context, chat_id):
                     continue
 
                 if not groups:
-                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] Hiç grup bulunamadı! Atlanıyor...")
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] Bu hesapta hiç grup bulunamadı! Atlanıyor...")
                     except Exception: pass
                     try: await client.disconnect()
                     except Exception: pass
@@ -177,7 +190,7 @@ async def sender_loop(uid, context, chat_id):
                         success_count += 1
                         detay_listesi.append(f"✅ Başarılı: {g_title}")
                     except FloodWaitError as exc:
-                        log.warning("Flood sınırı: %s sn", exc.seconds)
+                        log.warning("Flood sınırı yakalandı: %s sn", exc.seconds)
                         detay_listesi.append(f"⏳ Flood Sınırı ({exc.seconds}sn): {g_title}")
                         await asyncio.sleep(exc.seconds + 5)
                     except Exception as e:
@@ -204,7 +217,7 @@ async def sender_loop(uid, context, chat_id):
             current_loop_interval = fresh_user.get("loop_interval_seconds", 240) if fresh_user and fresh_user.get("loop_interval_seconds") is not None else 240
 
             try:
-                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Belirttiğin süre olan {current_loop_interval} saniye bekleniyor...")
+                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Belirttiğin süre olan {current_loop_interval} saniye mola bekleniyor...")
             except Exception: pass
             
             gc.collect()
@@ -213,7 +226,7 @@ async def sender_loop(uid, context, chat_id):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("Döngü hatası: %s", e)
+            log.exception("Döngü genel hatası: %s", e)
             await asyncio.sleep(10)
             
     tasks.pop(task_key, None)
@@ -310,7 +323,7 @@ async def text_handler(update, context):
             await update.effective_message.reply_text("Telefon numaranı +ülke koduyla gönder.")
             return
         session_name = f"SESSION_{uid}_{text}"
-        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=5, auto_reconnect=True)
+        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=3, auto_reconnect=True)
         await client.connect()
         try:
             sent = await client.send_code_request(text)
