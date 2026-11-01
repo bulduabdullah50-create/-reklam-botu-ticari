@@ -1,4 +1,10 @@
-import os, re, asyncio, secrets, string, logging, gc
+import os
+import re
+import asyncio
+import secrets
+import string
+import logging
+import gc
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -92,7 +98,7 @@ async def start_sender(uid, session_name, message_obj, context):
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (RAM bellek optimizasyonu aktif)")
+    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Sadece gruplar aktif)")
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
@@ -105,6 +111,7 @@ async def sender_loop(uid, context, chat_id):
                 await asyncio.sleep(15)
                 continue
 
+            # Süreleri tamamen senin panelden girdiğin ayarlardan alıyoruz
             loop_interval = user.get("loop_interval_seconds", 240) if user and user.get("loop_interval_seconds") is not None else 240
             group_interval = user.get("interval_seconds", 3) if user and user.get("interval_seconds") is not None else 3
 
@@ -130,22 +137,22 @@ async def sender_loop(uid, context, chat_id):
                     continue
 
                 ad_text = getattr(source_msg, 'text', '') or getattr(source_msg, 'message', '') or "Reklam İçeriği"
+                
+                # --- GRUP FİLTRELEME (KANALLAR TAMAMEN KAPALI) ---
                 try:
-                    dialogs = await client.get_dialogs()
                     groups = []
-                    for d in dialogs:
-                        entity = getattr(d, 'entity', None)
-                        if entity:
-                            is_chan = getattr(entity, 'broadcast', False)
-                            is_grp = getattr(entity, 'megagroup', False) or d.is_group
-                            if is_grp and not user.get("inc_groups", 1): continue
-                            if is_chan and not user.get("inc_channels", 1): continue
-                            if is_chan or is_grp or getattr(entity, 'title', None): groups.append(d)
-                    if not groups:
-                        for d in dialogs:
-                            if d.is_group or d.is_channel: groups.append(d)
+                    async for dialog in client.iter_dialogs():
+                        if dialog.is_group or dialog.is_supergroup:
+                            groups.append(dialog)
                 except Exception as e:
                     log.exception("Gruplar çekilirken hata (%s): %s", s_name, e)
+                    try: await client.disconnect()
+                    except Exception: pass
+                    continue
+
+                if not groups:
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] Hiç grup bulunamadı! Atlanıyor...")
+                    except Exception: pass
                     try: await client.disconnect()
                     except Exception: pass
                     continue
@@ -155,7 +162,7 @@ async def sender_loop(uid, context, chat_id):
                 success_count, fail_count, skipped_count, detay_listesi = 0, 0, 0, []
 
                 try:
-                    await context.bot.send_message(chat_id=chat_id, text=f"🚀 **[{s_name}]** hesabı kendi gruplarına tur başlattı! (Hedef: {len(groups)} yer)")
+                    await context.bot.send_message(chat_id=chat_id, text=f"🚀 **[{s_name}]** hesabı gruplara tur başlattı! (Hedef: {len(groups)} grup)")
                 except Exception: pass
 
                 for group in groups:
@@ -179,6 +186,8 @@ async def sender_loop(uid, context, chat_id):
                     except Exception as e:
                         fail_count += 1
                         detay_listesi.append(f"❌ Hatalı: {g_title}")
+                    
+                    # Kullanıcının belirlediği grup arası saniye gecikmesi
                     if group_interval > 0: await asyncio.sleep(group_interval)
 
                 tur_detaylari[s_name] = detay_listesi
@@ -191,16 +200,15 @@ async def sender_loop(uid, context, chat_id):
                     if client.is_connected(): await client.disconnect()
                 except Exception: pass
                 
-                del dialogs
                 del groups
                 gc.collect()
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
 
             fresh_user = db.get_user(uid)
             current_loop_interval = fresh_user.get("loop_interval_seconds", 240) if fresh_user and fresh_user.get("loop_interval_seconds") is not None else 240
 
             try:
-                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Sıradaki genel tur döngüsü için {current_loop_interval} saniye bekleniyor...")
+                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Belirttiğin süre olan {current_loop_interval} saniye bekleniyor...")
             except Exception: pass
             
             gc.collect()
@@ -249,25 +257,17 @@ async def button(update, context):
         session_name = action.replace("manage_", "")
         phone_num = session_name.split("_", 1)[1] if len(session_name.split("_", 1)) > 1 else session_name
         is_running = f"{uid}_auto_all_accounts" in tasks and not tasks[f"{uid}_auto_all_accounts"].done()
-        user = db.get_user(uid) or {}
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶ Başlat (Tüm Hesaplar)", callback_data=f"start_{session_name}"), InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_{session_name}")],
-            [InlineKeyboardButton(f"👥 Gruplar: {'✅' if user.get('inc_groups', 1) else '❌'}", callback_data=f"toggle_g_{session_name}"), InlineKeyboardButton(f"📢 Kanallar: {'✅' if user.get('inc_channels', 1) else '❌'}", callback_data=f"toggle_c_{session_name}")],
             [InlineKeyboardButton("🚫 Bu Hesaba Özel Grup/Kanal Engelle", callback_data=f"acc_bl_{session_name}")],
             [InlineKeyboardButton("❌ Bu Hesabı Sil", callback_data=f"del_{session_name}")],
             [InlineKeyboardButton("⬅ Hesaplara Dön", callback_data="accounts")]
         ])
-        await q.edit_message_text(f"📱 **Hesap Yönetimi:** `{phone_num}`\n\nSistem Durumu: {'🟢 Çalışıyor' if is_running else '🔴 Duruyor'}", parse_mode="Markdown", reply_markup=kb)
+        await q.edit_message_text(f"📱 **Hesap Yönetimi:** `{phone_num}`\n\nSistem Durumu: {'🟢 Çalışıyor' if is_running else '🔴 Duruyor'}\n*(Kanallar kapalı, sadece gruplara gönderim yapılır)*", parse_mode="Markdown", reply_markup=kb)
     elif action.startswith("acc_bl_"):
         session_name = action.replace("acc_bl_", "")
         context.user_data["flow"] = f"acc_blacklist_{session_name}"
         await q.edit_message_text(f"🚫 **HESABA ÖZEL ENGELLEME** (`{session_name}`)\n\nEngelleyeceğin grubun linkini veya kullanıcı adını gönder.", reply_markup=sub_menu_keyboard())
-    elif action.startswith("toggle_g_"):
-        db.set_user(uid, inc_groups=0 if (db.get_user(uid) or {}).get("inc_groups", 1) else 1)
-        await button(update, context)
-    elif action.startswith("toggle_c_"):
-        db.set_user(uid, inc_channels=0 if (db.get_user(uid) or {}).get("inc_channels", 1) else 1)
-        await button(update, context)
     elif action.startswith("report_"):
         session_name = action.replace("report_", "")
         await q.message.reply_text(f"📋 **{session_name} Son Tur Detayları**\n\n" + "\n".join(tur_detaylari.get(session_name, ["Henüz detay bulunmuyor."]))[:3950])
@@ -278,7 +278,7 @@ async def button(update, context):
         if f"{uid}_auto_all_accounts" in tasks: tasks.pop(f"{uid}_auto_all_accounts").cancel()
         clients.pop(session_name, None)
         db.delete_session_db(session_name)
-        await q.edit_message_text(f"✅ **{session_name}** hesabı silindi. (Eğer Render Environment kısmında SESSION_{session_name} ekli ise oradan da kaldırabilirsin.)", reply_markup=get_keyboard(uid))
+        await q.edit_message_text(f"✅ **{session_name}** hesabı silindi.", reply_markup=get_keyboard(uid))
     elif action == "ad": await q.edit_message_text("ℹ️ Her hesap reklamı doğrudan **kendi Kayıtlı Mesajlar'ındakinden** alır.", reply_markup=get_keyboard(uid))
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
