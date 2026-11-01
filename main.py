@@ -17,7 +17,7 @@ import database as db
 
 app_web = Flask(__name__)
 @app_web.route('/')
-def home_web(): return "Bot aktif ve zırhlı modda çalışıyor!"
+def home_web(): return "Bot aktif ve kararlı sürümde çalışıyor!"
 def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
@@ -46,7 +46,6 @@ def sub_menu_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅
 def admin_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("➕ KEY Oluştur", callback_data="key_create")], [InlineKeyboardButton("📋 KEY Listesi", callback_data="key_list")], [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]])
 
 async def get_client_by_session_string(session_name, s_string):
-    """Bozuk veya eksik session string'lerini yakalayıp botu asla çökertmeyen zırhlı yükleyici"""
     client = clients.get(session_name)
     if client:
         try:
@@ -58,11 +57,7 @@ async def get_client_by_session_string(session_name, s_string):
     try:
         clean_string = s_string.strip().strip('"').strip("'").replace("\n", "").replace("\r", "").strip()
         
-        # Telethon string session uzunluk kontrolü (bozuk stringler için koruma)
-        if len(clean_string) < 100:
-            log.warning("Oturum string'i çok kısa veya geçersiz (%s)", session_name)
-            return None
-
+        # Telethon StringSession güvenli yükleme
         client = TelegramClient(StringSession(clean_string), API_ID, API_HASH, connection_retries=2, auto_reconnect=True, timeout=20)
         await client.connect()
         if not await client.is_user_authorized():
@@ -71,7 +66,7 @@ async def get_client_by_session_string(session_name, s_string):
         clients[session_name] = client
         return client
     except Exception as e:
-        log.warning("Oturum çözülemedi (Render env string'i eksik/bozuk olabilir) [%s]: %s", session_name, e)
+        log.error("Oturum çözülemedi (Render env string'i bozuk/eksik) [%s]: %s", session_name, e)
         return None
 
 async def show_home(update, context):
@@ -98,7 +93,7 @@ async def start_sender(uid, session_name, message_obj, context):
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Zırhlı Mod: Sadece Gruplar)")
+    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Sadece Gruplar)")
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
@@ -107,13 +102,19 @@ async def sender_loop(uid, context, chat_id):
             if not has_valid_access(uid): break
             user = db.get_user(uid)
             
+            # Hem Render environment değişkenlerini hem de veritabanını tarıyoruz
             active_sessions = []
             for k, v in os.environ.items():
-                if k.startswith("SESSION_") and v and len(v.strip()) > 20:
+                if k.startswith("SESSION_") and v and len(v.strip()) > 50:
                     active_sessions.append((k, v))
             
+            db_sessions = db.get_user_sessions_db(uid)
+            for s_name, s_string in db_sessions:
+                if not any(item[0] == s_name for item in active_sessions) and s_string and len(s_string.strip()) > 50:
+                    active_sessions.append((s_name, s_string))
+
             if not active_sessions:
-                try: await context.bot.send_message(chat_id=chat_id, text="❌ Render environment kısmında geçerli SESSION_ bulunamadı!")
+                try: await context.bot.send_message(chat_id=chat_id, text="❌ Aktif ve geçerli oturum bulunamadı! Lütfen menüden 'Hesap Ekle' ile hesap bağlayın.")
                 except Exception: pass
                 await asyncio.sleep(15)
                 continue
@@ -126,7 +127,8 @@ async def sender_loop(uid, context, chat_id):
                 
                 client = await get_client_by_session_string(s_name, s_string)
                 if not client:
-                    # Bozuk session için kullanıcıyı boğmamak adına log düşüp es geçiyoruz
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] oturumu açılamadı (String bozuk/eksik). Bu hesabı silip yeniden ekleyin.")
+                    except Exception: pass
                     continue
 
                 try:
@@ -253,11 +255,13 @@ async def button(update, context):
         context.user_data["flow"] = "phone"
         await q.edit_message_text("➕ YENİ HESAP EKLE\n\nEklenecek Telegram numaranı ülke koduyla gönder.\nÖrnek: +905xxxxxxxxx", reply_markup=sub_menu_keyboard())
     elif action == "accounts":
+        db_sessions = db.get_user_sessions_db(uid)
         active_sessions = [k for k in os.environ.keys() if k.startswith("SESSION_")]
-        if not active_sessions:
-            await q.edit_message_text("👤 HESAPLARIM\n\nRender environment kısmında kayıtlı hesap bulunmuyor.", reply_markup=get_keyboard(uid))
+        all_accs = list(set([s[0] for s in db_sessions] + active_sessions))
+        if not all_accs:
+            await q.edit_message_text("👤 HESAPLARIM\n\nHenüz kayıtlı hesap bulunmuyor.", reply_markup=get_keyboard(uid))
             return
-        keyboard_rows = [[InlineKeyboardButton(f"📱 {s_name.replace('SESSION_', '')}", callback_data=f"manage_{s_name}")] for s_name in active_sessions]
+        keyboard_rows = [[InlineKeyboardButton(f"📱 {s_name.replace('SESSION_', '')}", callback_data=f"manage_{s_name}")] for s_name in all_accs]
         keyboard_rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
         await q.edit_message_text("👤 HESAPLARIM\n\nYönetmek istediğin hesaba tıkla:", reply_markup=InlineKeyboardMarkup(keyboard_rows))
     elif action.startswith("manage_"):
@@ -267,6 +271,7 @@ async def button(update, context):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶ Başlat (Tüm Hesaplar)", callback_data=f"start_{session_name}"), InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_{session_name}")],
             [InlineKeyboardButton("🚫 Bu Hesaba Özel Grup Engel", callback_data=f"acc_bl_{session_name}")],
+            [InlineKeyboardButton("❌ Bu Hesabı Sil", callback_data=f"del_{session_name}")],
             [InlineKeyboardButton("⬅ Hesaplara Dön", callback_data="accounts")]
         ])
         await q.edit_message_text(f"📱 **Hesap Yönetimi:** `{phone_num}`\n\nSistem Durumu: {'🟢 Çalışıyor' if is_running else '🔴 Duruyor'}\n*(Kanallar kapalı, sadece gruplara gönderim yapılır)*", parse_mode="Markdown", reply_markup=kb)
@@ -279,6 +284,12 @@ async def button(update, context):
         await q.message.reply_text(f"📋 **{session_name} Son Tur Detayları**\n\n" + "\n".join(tur_detaylari.get(session_name, ["Henüz detay bulunmuyor."]))[:3950])
     elif action.startswith("start_"): await start_sender(uid, action.replace("start_", ""), q.message, context)
     elif action.startswith("stop_"): await stop_sender(uid, action.replace("stop_", ""), q.message.chat_id, context)
+    elif action.startswith("del_"):
+        session_name = action.replace("del_", "")
+        if f"{uid}_auto_all_accounts" in tasks: tasks.pop(f"{uid}_auto_all_accounts").cancel()
+        clients.pop(session_name, None)
+        db.delete_session_db(session_name)
+        await q.edit_message_text(f"✅ **{session_name}** hesabı veritabanından silindi.", reply_markup=get_keyboard(uid))
     elif action == "ad": await q.edit_message_text("ℹ️ Her hesap reklamı doğrudan **kendi Kayıtlı Mesajlar'ındakinden** alır.", reply_markup=get_keyboard(uid))
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
@@ -293,8 +304,10 @@ async def button(update, context):
         context.user_data["flow"] = "redeem"
         await q.edit_message_text("🔑 KEY kodunu gönder.", reply_markup=sub_menu_keyboard())
     elif action == "status":
+        db_sessions = db.get_user_sessions_db(uid)
         active_sessions = [k for k in os.environ.keys() if k.startswith("SESSION_")]
-        await q.edit_message_text(f"📊 SİSTEM DURUMU\n\nKayıtlı Hesap Sayısı: {len(active_sessions)}\nLisans Durumu: Aktif", reply_markup=get_keyboard(uid))
+        total_acc = len(set([s[0] for s in db_sessions] + active_sessions))
+        await q.edit_message_text(f"📊 SİSTEM DURUMU\n\nKayıtlı Hesap Sayısı: {total_acc}\nLisans Durumu: Aktif", reply_markup=get_keyboard(uid))
     elif action == "admin" and is_admin(uid): await q.edit_message_text("👑 YÖNETİCİ PANELİ", reply_markup=admin_keyboard())
     elif action == "key_create" and is_admin(uid):
         context.user_data["flow"] = "key_days"
@@ -342,9 +355,10 @@ async def text_handler(update, context):
             s_name = item["session_name"]
             s_string = item["client"].session.save()
             clients[s_name] = item["client"]
+            db.save_session_db(uid, s_name, s_string)
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı bağlandı!\n\n🔑 **Kalıcılık için Önemli Not:** Render panelinde **Environment** bölümüne şunu ekle:\nKey: `{s_name}`\nValue: `{s_string}`", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı başarıyla bağlandı ve veritabanına kaydedildi!", reply_markup=get_keyboard(uid))
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
             await update.effective_message.reply_text("İki adımlı doğrulama (2FA) şifreni gönder:")
@@ -363,9 +377,10 @@ async def text_handler(update, context):
             s_name = item["session_name"]
             s_string = item["client"].session.save()
             clients[s_name] = item["client"]
+            db.save_session_db(uid, s_name, s_string)
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text(f"✅ Hesap bağlandı!\n\n🔑 **Kalıcılık için Önemli Not:** Render panelinde **Environment** bölümüne ekle:\nKey: `{s_name}`\nValue: `{s_string}`", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ Hesap başarıyla bağlandı ve kaydedildi!", reply_markup=get_keyboard(uid))
         except PasswordHashInvalidError:
             await update.effective_message.reply_text("Şifre hatalı. Tekrar dene.")
         except Exception:
@@ -398,7 +413,7 @@ async def text_handler(update, context):
             context.user_data.clear()
             await update.effective_message.reply_text(f"✅ KEY OLUŞTURULDU\n\n`{code}`\n\nSüre: {days} gün", parse_mode="Markdown", reply_markup=admin_keyboard())
         except ValueError:
-            await update.effective_message.reply_text("1 ile 3650 arasında gün gir.")
+            await update.effective_change.reply_text if hasattr(update, 'effective_change') else update.effective_message.reply_text("1 ile 3650 arasında gün gir.")
 
 async def shutdown(app):
     for item in list(pending.values()):
