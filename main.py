@@ -1,41 +1,18 @@
-import os
-import re
-import asyncio
-import secrets
-import string
-import logging
+import os, re, asyncio, secrets, string, logging
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from flask import Flask
-
 from telethon import TelegramClient
-from telethon.errors import (
-    SessionPasswordNeededError,
-    PhoneCodeInvalidError,
-    PhoneCodeExpiredError,
-    PasswordHashInvalidError,
-    FloodWaitError,
-)
-
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError, PasswordHashInvalidError, FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
-)
-
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 import database as db
 
-# Render ve dış tetikleyiciler için web sunucusu
 app_web = Flask(__name__)
-
 @app_web.route('/')
-def home_web():
-    return "Bot aktif ve çalışıyor! Çoklu hesap motoru devrede."
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app_web.run(host="0.0.0.0", port=port)
+def home_web(): return "Bot aktif ve çalışıyor! Çoklu hesap motoru devrede."
+def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("farketmezda")
@@ -49,199 +26,110 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SESSIONS = DATA_DIR / "sessions"
 SESSIONS.mkdir(parents=True, exist_ok=True)
 
-clients = {}
-pending = {}
-tasks = {}
-blacklisted_groups = {}
-account_blacklists = {}
-tur_detaylari = {}
+clients, pending, tasks, blacklisted_groups, account_blacklists, tur_detaylari = {}, {}, {}, {}, {}, {}
 
-
-def is_admin(uid):
-    return int(uid) == ADMIN_ID
-
-
-def has_valid_access(uid):
-    return is_admin(uid) or db.license_valid(uid)
-
+def is_admin(uid): return int(uid) == ADMIN_ID
+def has_valid_access(uid): return is_admin(uid) or db.license_valid(uid)
 
 def get_keyboard(uid):
-    rows = [
-        [
-            InlineKeyboardButton("➕ Hesap Ekle", callback_data="add"),
-            InlineKeyboardButton("👤 Hesaplarım", callback_data="accounts"),
-        ],
-        [
-            InlineKeyboardButton("📩 Reklam Seç", callback_data="ad"),
-            InlineKeyboardButton("🚫 Genel Grup Engel", callback_data="blacklist"),
-        ],
-        [
-            InlineKeyboardButton("⏱ Grup Aralığı", callback_data="time_group"),
-            InlineKeyboardButton("⏳ Tur Süresi", callback_data="time_loop"),
-        ],
-        [
-            InlineKeyboardButton("📊 Durum", callback_data="status"),
-            InlineKeyboardButton("🔑 KEY Kullan", callback_data="redeem"),
-        ],
-        [
-            InlineKeyboardButton("💬 İletişim", url="https://t.me/farketmezda"),
-        ],
-    ]
-
-    if is_admin(uid):
-        rows.append([
-            InlineKeyboardButton("👑 Yönetici Paneli", callback_data="admin")
-        ])
-
+    rows = [[InlineKeyboardButton("➕ Hesap Ekle", callback_data="add"), InlineKeyboardButton("👤 Hesaplarım", callback_data="accounts")],
+            [InlineKeyboardButton("📩 Reklam Seç", callback_data="ad"), InlineKeyboardButton("🚫 Genel Grup Engel", callback_data="blacklist")],
+            [InlineKeyboardButton("⏱ Grup Aralığı", callback_data="time_group"), InlineKeyboardButton("⏳ Tur Süresi", callback_data="time_loop")],
+            [InlineKeyboardButton("📊 Durum", callback_data="status"), InlineKeyboardButton("🔑 KEY Kullan", callback_data="redeem")],
+            [InlineKeyboardButton("💬 İletişim", url="https://t.me/farketmezda")]]
+    if is_admin(uid): rows.append([InlineKeyboardButton("👑 Yönetici Paneli", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
-
-def sub_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")]
-    ])
-
-
-def admin_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ KEY Oluştur", callback_data="key_create")],
-        [InlineKeyboardButton("📋 KEY Listesi", callback_data="key_list")],
-        [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")],
-    ])
-
+def sub_menu_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")]])
+def admin_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("➕ KEY Oluştur", callback_data="key_create")], [InlineKeyboardButton("📋 KEY Listesi", callback_data="key_list")], [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]])
 
 async def get_client(session_name):
+    path = SESSIONS / session_name
+    session_file = Path(str(path) + ".session")
+    if not session_file.exists(): return None
     client = clients.get(session_name)
     if client:
         try:
-            if not client.is_connected():
-                await client.connect()
-            if await client.is_user_authorized():
-                return client
-        except Exception:
-            pass
-
-    path = SESSIONS / session_name
-    session_file = Path(str(path) + ".session")
-
-    if not session_file.exists():
-        return None
-
+            if not client.is_connected(): await client.connect()
+            if await client.is_user_authorized(): return client
+            else: clients.pop(session_name, None)
+        except Exception: clients.pop(session_name, None)
     try:
-        client = TelegramClient(str(path), API_ID, API_HASH, connection_retries=None, auto_reconnect=True)
+        client = TelegramClient(str(path), API_ID, API_HASH, connection_retries=5, auto_reconnect=True, timeout=30)
         await client.connect()
-
         if not await client.is_user_authorized():
             await client.disconnect()
             return None
-
         clients[session_name] = client
         return client
     except Exception:
-        log.exception("Client yükleme hatası")
+        log.exception("Client yükleme hatası: %s", session_name)
         return None
-
 
 async def show_home(update, context):
     uid = update.effective_user.id
     db.ensure_user(uid, update.effective_user.username)
-
-    text = (
-        "💜 FARKETMEZDA\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "NEON YÖNETİM PANELİ\n\n"
-        "Hoş geldin!\n"
-        "İşlem yapmak için menüden seçim yap."
-    )
-
+    text = "💜 FARKETMEZDA\n━━━━━━━━━━━━━━━━━━\nNEON YÖNETİM PANELİ\n\nHoş geldin!\nİşlem yapmak için menüden seçim yap."
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            text, reply_markup=get_keyboard(uid)
-        )
+        await update.callback_query.edit_message_text(text, reply_markup=get_keyboard(uid))
     else:
-        await update.effective_message.reply_text(
-            text, reply_markup=get_keyboard(uid)
-        )
-
+        await update.effective_message.reply_text(text, reply_markup=get_keyboard(uid))
 
 async def start(update, context):
     context.user_data.clear()
     await show_home(update, context)
 
-
 async def start_sender(uid, session_name, message_obj, context):
     if not has_valid_access(uid):
         await message_obj.reply_text("❌ Aktif lisansın bulunmuyor! Lütfen geçerli bir KEY kullan.")
         return
-
     task_key = f"{uid}_auto_all_accounts"
     current = tasks.get(task_key)
     if current and not current.done():
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
-
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
     await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** Her hesap kendi Kayıtlı Mesajlar'ından alacağı reklamı kendi gruplarına sırayla atacak.")
-
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
     while True:
         try:
-            if not has_valid_access(uid):
-                break
-
+            if not has_valid_access(uid): break
             user = db.get_user(uid)
             user_sessions = list(SESSIONS.glob(f"{uid}_*.session"))
             if not user_sessions:
-                await asyncio.sleep(15)
-                continue
+                await asyncio.sleep(5)
+                user_sessions = list(SESSIONS.glob(f"{uid}_*.session"))
+                if not user_sessions:
+                    await asyncio.sleep(15)
+                    continue
 
             loop_interval = user.get("loop_interval_seconds", 240) if user else 240
             group_interval = user.get("interval_seconds", 3) if user else 3
 
-            # HER HESAP KENDİ SESSION'I İLE AÇILIP KENDİ GRUPLARINA REKLAM ATACAK
             for s_file in user_sessions:
                 current_session_name = s_file.stem
-                
-                if task_key not in tasks:
-                    break
-
+                if task_key not in tasks: break
                 client = await get_client(current_session_name)
-                if not client:
-                    continue
-
+                if not client: continue
                 try:
-                    if not client.is_connected():
-                        await client.connect()
-
-                    # Her hesap KENDİ Kayıtlı Mesajlar'ındaki son mesajı reklam olarak alır
+                    if not client.is_connected(): await client.connect()
                     messages = await client.get_messages("me", limit=1)
                     if not messages:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=f"❌ '{current_session_name}' hesabının Kayıtlı Mesajlar'ı boş! Reklam atılamadı."
-                            )
-                        except Exception:
-                            pass
+                        try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{current_session_name}' hesabının Kayıtlı Mesajlar'ı boş!")
+                        except Exception: pass
                         await client.disconnect()
                         continue
                     source_msg = messages[0]
                 except Exception as e:
-                    log.exception("Kayıtlı mesaj alınamadı (%s): %s", current_session_name, e)
-                    try:
-                        await client.disconnect()
-                    except Exception:
-                        pass
+                    log.exception("Kayıtlı mesaj alınamadı: %s", e)
+                    try: await client.disconnect()
+                    except Exception: pass
                     continue
 
-                ad_text = getattr(source_msg, 'text', '') or getattr(source_msg, 'message', '')
-                if not ad_text:
-                    ad_text = "Reklam İçeriği"
-
-                # BU HESABIN KENDİ ÜYE OLDUĞU GRUPLARI ÇEKİYORUZ
+                ad_text = getattr(source_msg, 'text', '') or getattr(source_msg, 'message', '') or "Reklam İçeriği"
                 try:
                     dialogs = await client.get_dialogs()
                     groups = []
@@ -250,52 +138,29 @@ async def sender_loop(uid, context, chat_id):
                         if entity:
                             is_chan = getattr(entity, 'broadcast', False)
                             is_grp = getattr(entity, 'megagroup', False) or d.is_group
-                            
-                            include_groups = user.get("inc_groups", 1) if user else 1
-                            include_channels = user.get("inc_channels", 1) if user else 1
-
-                            if is_grp and not include_groups:
-                                continue
-                            if is_chan and not include_channels:
-                                continue
-
-                            if is_chan or is_grp or getattr(entity, 'title', None):
-                                groups.append(d)
-                    
+                            if is_grp and not user.get("inc_groups", 1): continue
+                            if is_chan and not user.get("inc_channels", 1): continue
+                            if is_chan or is_grp or getattr(entity, 'title', None): groups.append(d)
                     if not groups:
                         for d in dialogs:
-                            if d.is_group or d.is_channel:
-                                groups.append(d)
+                            if d.is_group or d.is_channel: groups.append(d)
                 except Exception as e:
-                    log.exception("Gruplar çekilirken hata (%s): %s", current_session_name, e)
-                    try:
-                        await client.disconnect()
-                    except Exception:
-                        pass
+                    log.exception("Gruplar çekilirken hata: %s", e)
+                    try: await client.disconnect()
+                    except Exception: pass
                     continue
 
                 user_bl = blacklisted_groups.get(uid, set())
                 acc_bl = account_blacklists.get(current_session_name, set())
-                
-                success_count = 0
-                fail_count = 0
-                skipped_count = 0
-                detay_listesi = []
+                success_count, fail_count, skipped_count, detay_listesi = 0, 0, 0, []
 
                 try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🚀 **[{current_session_name}]** hesabı kendi gruplarına tur başlattı! (Hedef: {len(groups)} yer)"
-                    )
-                except Exception:
-                    pass
+                    await context.bot.send_message(chat_id=chat_id, text=f"🚀 **[{current_session_name}]** hesabı kendi gruplarına tur başlattı! (Hedef: {len(groups)} yer)")
+                except Exception: pass
 
                 for group in groups:
-                    if task_key not in tasks:
-                        break
-
-                    g_id = str(group.id)
-                    entity = getattr(group, 'entity', None)
+                    if task_key not in tasks: break
+                    g_id, entity = str(group.id), getattr(group, 'entity', None)
                     g_username = f"@{entity.username}".lower() if entity and getattr(entity, 'username', None) else ""
                     g_title = getattr(group, 'name', 'İsimsiz Grup')
 
@@ -303,75 +168,38 @@ async def sender_loop(uid, context, chat_id):
                         skipped_count += 1
                         detay_listesi.append(f"🚫 Engellendi/Atlandı: {g_title}")
                         continue
-
                     try:
                         await client.send_message(group.id, ad_text)
                         success_count += 1
                         detay_listesi.append(f"✅ Başarılı: {g_title}")
                     except FloodWaitError as exc:
-                        log.warning("Telegram bekleme sınırı: %s saniye", exc.seconds)
                         detay_listesi.append(f"⏳ Flood Sınırı ({exc.seconds}sn): {g_title}")
                         await asyncio.sleep(exc.seconds + 5)
                     except Exception as e:
                         fail_count += 1
                         detay_listesi.append(f"❌ Hatalı: {g_title}")
-                        log.exception("Gönderim hatası (%s): %s", g_title, e)
-
-                    if group_interval > 0:
-                        await asyncio.sleep(group_interval)
+                    if group_interval > 0: await asyncio.sleep(group_interval)
 
                 tur_detaylari[current_session_name] = detay_listesi
+                try:
+                    report_kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Detaylı Raporu Gör", callback_data=f"report_{current_session_name}")]])
+                    await context.bot.send_message(chat_id=chat_id, text=f"📊 **[{current_session_name}] Hesabının Turu Tamamlandı!**\n\n✅ Başarılı: {success_count}\n❌ Hatalı: {fail_count}\n🚫 Engellenen: {skipped_count}", reply_markup=report_kb)
+                except Exception: pass
 
                 try:
-                    report_kb = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📋 Detaylı Raporu Gör", callback_data=f"report_{current_session_name}")]
-                    ])
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"📊 **[{current_session_name}] Hesabının Turu Tamamlandı!**\n\n"
-                             f"✅ Başarılı: {success_count}\n"
-                             f"❌ Hatalı: {fail_count}\n"
-                             f"🚫 Engellenen: {skipped_count}",
-                        reply_markup=report_kb
-                    )
-                except Exception:
-                    pass
-
-                # İşlem bittiğinde bu hesabın bağlantısı güvenle koparılır, diğer hesaba geçilir
-                try:
-                    if client.is_connected():
-                        await client.disconnect()
-                except Exception:
-                    pass
+                    if client.is_connected(): await client.disconnect()
+                except Exception: pass
                 await asyncio.sleep(5)
 
-            # TÜM HESAPLAR KENDİ TURLARINI TAMAMLAYINCA GENEL SÜRE BEKLENİR
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"⏳ Tüm hesaplar turunu tamamladı. Sıradaki genel tur döngüsü için {loop_interval} saniye bekleniyor..."
-                )
-            except Exception:
-                pass
-
-            if loop_interval > 0:
-                await asyncio.sleep(loop_interval)
-
-        except asyncio.CancelledError:
-            break
+                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Sıradaki genel tur döngüsü için {loop_interval} saniye bekleniyor...")
+            except Exception: pass
+            if loop_interval > 0: await asyncio.sleep(loop_interval)
+        except asyncio.CancelledError: break
         except Exception as e:
-            log.exception("Döngü durdu, hata: %s", e)
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🚨 **DÖNGÜ DURDU / HATA ALINDI!**\n\nHata Detayı: `{str(e)}`"
-                )
-            except Exception:
-                pass
+            log.exception("Döngü hatası: %s", e)
             await asyncio.sleep(15)
-    
     tasks.pop(task_key, None)
-
 
 async def stop_sender(uid, session_name, chat_id, context):
     task_key = f"{uid}_auto_all_accounts"
@@ -383,532 +211,197 @@ async def stop_sender(uid, session_name, chat_id, context):
     else:
         await context.bot.send_message(chat_id=chat_id, text="⚠️ Zaten çalışan aktif bir gönderim bulunmuyor.")
 
-
 async def button(update, context):
     q = update.callback_query
     await q.answer()
-
-    uid = q.from_user.id
+    uid, action = q.from_user.id, q.data
     db.ensure_user(uid, q.from_user.username)
-    action = q.data
 
-    if action == "home":
-        await q.edit_message_text(
-            "💜 FARKETMEZDA NEON PANEL",
-            reply_markup=get_keyboard(uid)
-        )
-
+    if action == "home": await q.edit_message_text("💜 FARKETMEZDA NEON PANEL", reply_markup=get_keyboard(uid))
     elif action == "add":
         if not has_valid_access(uid):
-            await q.edit_message_text(
-                "❌ **Erişim Engellendi!**\nHesap eklemek için aktif lisansınızın bulunması gerekir.\nLütfen önce '🔑 KEY Kullan' butonundan kodunuzu girin.",
-                reply_markup=sub_menu_keyboard()
-            )
+            await q.edit_message_text("❌ **Erişim Engellendi!**\nHesap eklemek için aktif lisansınızın bulunması gerekir.", reply_markup=sub_menu_keyboard())
             return
-
         context.user_data["flow"] = "phone"
-        await q.edit_message_text(
-            "➕ YENİ HESAP EKLE\n\n"
-            "Eklenecek Telegram numaranı ülke koduyla gönder.\n"
-            "Örnek: +905xxxxxxxxx",
-            reply_markup=sub_menu_keyboard()
-        )
-
+        await q.edit_message_text("➕ YENİ HESAP EKLE\n\nEklenecek Telegram numaranı ülke koduyla gönder.\nÖrnek: +905xxxxxxxxx", reply_markup=sub_menu_keyboard())
     elif action == "accounts":
         user_sessions = list(SESSIONS.glob(f"{uid}_*.session"))
-        
         if not user_sessions:
-            await q.edit_message_text(
-                "👤 HESAPLARIM\n\nHenüz eklenmiş bir hesap bulunmuyor.",
-                reply_markup=get_keyboard(uid)
-            )
+            await q.edit_message_text("👤 HESAPLARIM\n\nHenüz eklenmiş bir hesap bulunmuyor.", reply_markup=get_keyboard(uid))
             return
-
-        keyboard_rows = []
-        for s_file in user_sessions:
-            full_name = s_file.stem
-            parts = full_name.split("_", 1)
-            phone_num = parts[1] if len(parts) > 1 else full_name
-
-            keyboard_rows.append([
-                InlineKeyboardButton(f"📱 {phone_num}", callback_data=f"manage_{full_name}")
-            ])
-        
+        keyboard_rows = [[InlineKeyboardButton(f"📱 {s_file.stem.split('_', 1)[1] if len(s_file.stem.split('_', 1)) > 1 else s_file.stem}", callback_data=f"manage_{s_file.stem}")] for s_file in user_sessions]
         keyboard_rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
-
-        await q.edit_message_text(
-            "👤 HESAPLARIM\n\nYönetmek veya silmek istediğin hesaba tıkla:",
-            reply_markup=InlineKeyboardMarkup(keyboard_rows)
-        )
-
+        await q.edit_message_text("👤 HESAPLARIM\n\nYönetmek veya silmek istediğin hesaba tıkla:", reply_markup=InlineKeyboardMarkup(keyboard_rows))
     elif action.startswith("manage_"):
         session_name = action.replace("manage_", "")
-        parts = session_name.split("_", 1)
-        phone_num = parts[1] if len(parts) > 1 else session_name
-
-        task_key = f"{uid}_auto_all_accounts"
-        is_running = task_key in tasks and not tasks[task_key].done()
-        status_text = "🟢 Çalışıyor" if is_running else "🔴 Duruyor"
-
+        phone_num = session_name.split("_", 1)[1] if len(session_name.split("_", 1)) > 1 else session_name
+        is_running = f"{uid}_auto_all_accounts" in tasks and not tasks[f"{uid}_auto_all_accounts"].done()
         user = db.get_user(uid) or {}
-        inc_g = user.get("inc_groups", 1)
-        inc_c = user.get("inc_channels", 1)
-        
         acc_bl = account_blacklists.get(session_name, set())
-
         kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("▶ Başlat (Tüm Hesaplar)", callback_data=f"start_{session_name}"),
-                InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_{session_name}")
-            ],
-            [
-                InlineKeyboardButton(f"👥 Gruplar: {'✅' if inc_g else '❌'}", callback_data=f"toggle_g_{session_name}"),
-                InlineKeyboardButton(f"📢 Kanallar: {'✅' if inc_c else '❌'}", callback_data=f"toggle_c_{session_name}")
-            ],
-            [
-                InlineKeyboardButton("🚫 Bu Hesaba Özel Grup/Kanal Engelle", callback_data=f"acc_bl_{session_name}")
-            ],
-            [
-                InlineKeyboardButton("❌ Bu Hesabı Sil", callback_data=f"del_{session_name}")
-            ],
-            [
-                InlineKeyboardButton("⬅ Hesaplara Dön", callback_data="accounts")
-            ]
+            [InlineKeyboardButton("▶ Başlat (Tüm Hesaplar)", callback_data=f"start_{session_name}"), InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_{session_name}")],
+            [InlineKeyboardButton(f"👥 Gruplar: {'✅' if user.get('inc_groups', 1) else '❌'}", callback_data=f"toggle_g_{session_name}"), InlineKeyboardButton(f"📢 Kanallar: {'✅' if user.get('inc_channels', 1) else '❌'}", callback_data=f"toggle_c_{session_name}")],
+            [InlineKeyboardButton("🚫 Bu Hesaba Özel Grup/Kanal Engelle", callback_data=f"acc_bl_{session_name}")],
+            [InlineKeyboardButton("❌ Bu Hesabı Sil", callback_data=f"del_{session_name}")],
+            [InlineKeyboardButton("⬅ Hesaplara Dön", callback_data="accounts")]
         ])
-
-        bl_info = f"\n🔒 Hesaba Özel Engelli: {len(acc_bl)} adet" if acc_bl else ""
-
-        await q.edit_message_text(
-            f"📱 **Hesap Yönetimi:** `{phone_num}`\n\n"
-            f"Sistem Durumu: {status_text}{bl_info}\n\n"
-            f"*(Her hesap kendi Kayıtlı Mesajlar'ındaki reklamı kendi katıldığı gruplara atar)*",
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-
+        await q.edit_message_text(f"📱 **Hesap Yönetimi:** `{phone_num}`\n\nSistem Durumu: {'🟢 Çalışıyor' if is_running else '🔴 Duruyor'}", parse_mode="Markdown", reply_markup=kb)
     elif action.startswith("acc_bl_"):
         session_name = action.replace("acc_bl_", "")
         context.user_data["flow"] = f"acc_blacklist_{session_name}"
-        
-        acc_bl = account_blacklists.get(session_name, set())
-        bl_text = "\n".join(f"• {x}" for x in acc_bl) if acc_bl else "Henüz bu hesaba özel engel yok."
-
-        await q.edit_message_text(
-            f"🚫 **HESABA ÖZEL ENGELLEME** (`{session_name}`)\n\n"
-            "Bu numaranın reklam atmasını istemediğin grubun/kanalın linkini veya kullanıcı adını gönder.\n"
-            "Örnek: @grupadi veya t.me/grupadi\n\n"
-            f"📋 Engellenenler:\n{bl_text}",
-            parse_mode="Markdown",
-            reply_markup=sub_menu_keyboard()
-        )
-
+        await q.edit_message_text(f"🚫 **HESABA ÖZEL ENGELLEME** (`{session_name}`)\n\nEngelleyeceğin grubun linkini veya kullanıcı adını gönder.", reply_markup=sub_menu_keyboard())
     elif action.startswith("toggle_g_"):
-        user = db.get_user(uid) or {}
-        current = user.get("inc_groups", 1)
-        db.set_user(uid, inc_groups=0 if current else 1)
+        db.set_user(uid, inc_groups=0 if (db.get_user(uid) or {}).get("inc_groups", 1) else 1)
         await button(update, context)
-
     elif action.startswith("toggle_c_"):
-        user = db.get_user(uid) or {}
-        current = user.get("inc_channels", 1)
-        db.set_user(uid, inc_channels=0 if current else 1)
+        db.set_user(uid, inc_channels=0 if (db.get_user(uid) or {}).get("inc_channels", 1) else 1)
         await button(update, context)
-
     elif action.startswith("report_"):
         session_name = action.replace("report_", "")
-        detaylar = tur_detaylari.get(session_name, ["Henüz detay bulunmuyor."])
-        metin = f"📋 **{session_name} Son Tur Detayları**\n\n" + "\n".join(detaylar)
-        if len(metin) > 4000:
-            metin = metin[:3950] + "\n... (Liste çok uzun)"
-        
-        await q.message.reply_text(metin)
-
-    elif action.startswith("start_"):
-        session_name = action.replace("start_", "")
-        await start_sender(uid, session_name, q.message, context)
-
-    elif action.startswith("stop_"):
-        session_name = action.replace("stop_", "")
-        await stop_sender(uid, session_name, q.message.chat_id, context)
-
+        await q.message.reply_text(f"📋 **{session_name} Son Tur Detayları**\n\n" + "\n".join(tur_detaylari.get(session_name, ["Henüz detay bulunmuyor."]))[:3950])
+    elif action.startswith("start_"): await start_sender(uid, action.replace("start_", ""), q.message, context)
+    elif action.startswith("stop_"): await stop_sender(uid, action.replace("stop_", ""), q.message.chat_id, context)
     elif action.startswith("del_"):
         session_name = action.replace("del_", "")
-        task_key = f"{uid}_auto_all_accounts"
-        if task_key in tasks:
-            tasks[task_key].cancel()
-            tasks.pop(task_key, None)
-
-        client = clients.pop(session_name, None)
-        if client:
-            try:
-                await client.log_out()
-            except Exception:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-
-        session_file = SESSIONS / f"{session_name}.session"
-        if session_file.exists():
-            try:
-                session_file.unlink()
-            except Exception:
-                pass
-
-        await q.edit_message_text(
-            f"✅ **{session_name}** hesabı sistemden tamamen çıkarıldı.",
-            reply_markup=get_keyboard(uid)
-        )
-
-    elif action == "ad":
-        await q.edit_message_text(
-            "ℹ️ **Bilgi:** Yeni sistemde her hesap reklamı doğrudan **kendi Kayıtlı Mesajlar'ındaki** son mesajdan alır. Ekstra butonla reklam seçmene gerek yoktur.",
-            reply_markup=get_keyboard(uid)
-        )
-
-    elif action.startswith("pickad_"):
-        await q.answer("Bu menü güncellenmiştir.", show_alert=True)
-
+        if f"{uid}_auto_all_accounts" in tasks: tasks.pop(f"{uid}_auto_all_accounts").cancel()
+        clients.pop(session_name, None)
+        s_file = SESSIONS / f"{session_name}.session"
+        if s_file.exists(): s_file.unlink()
+        await q.edit_message_text(f"✅ **{session_name}** hesabı sistemden tamamen çıkarıldı.", reply_markup=get_keyboard(uid))
+    elif action == "ad": await q.edit_message_text("ℹ️ Her hesap reklamı doğrudan **kendi Kayıtlı Mesajlar'ındakinden** alır.", reply_markup=get_keyboard(uid))
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
-        bl_set = blacklisted_groups.get(uid, set())
-        bl_text = "\n".join(f"• {x}" for x in bl_set) if bl_set else "Henüz engel yok."
-        
-        await q.edit_message_text(
-            "🚫 GENEL GRUP ENGELLEME / KARALİSTE\n\n"
-            "Tüm hesaplarda engellemek istediğin grubun Linkini (t.me/grup) veya Kullanıcı adını (@grup) gönder.\n\n"
-            f"📋 Engellenenler:\n{bl_text}",
-            reply_markup=sub_menu_keyboard()
-        )
-
+        await q.edit_message_text("🚫 GENEL GRUP ENGELLEME\nTüm hesaplarda engellenecek grubun linkini veya kullanıcı adını gönder.", reply_markup=sub_menu_keyboard())
     elif action == "time_group":
-        user = db.get_user(uid)
-        seconds = user["interval_seconds"] if user and user.get("interval_seconds") is not None else 3
         context.user_data["flow"] = "interval_group"
-
-        await q.edit_message_text(
-            f"⏱ Mevcut Grup Aralığı: {seconds} saniye\n\n"
-            "İki grup arasında beklenecek saniyeyi gönder (Örn: 3):",
-            reply_markup=sub_menu_keyboard()
-        )
-
+        await q.edit_message_text(f"⏱ Grup Aralığı: {(db.get_user(uid) or {}).get('interval_seconds', 3)} saniye\nYeni saniyeyi gönder:", reply_markup=sub_menu_keyboard())
     elif action == "time_loop":
-        user = db.get_user(uid)
-        loop_sec = user["loop_interval_seconds"] if user and user.get("loop_interval_seconds") is not None else 240
         context.user_data["flow"] = "interval_loop"
-
-        await q.edit_message_text(
-            f"⏳ Mevcut Tur Süresi: {loop_sec} saniye ({loop_sec // 60} dakika)\n\n"
-            "Tüm gruplar bittikten sonra tur başı beklenecek süreyi saniye olarak gönder (Örn: 240):",
-            reply_markup=sub_menu_keyboard()
-        )
-
+        await q.edit_message_text(f"⏳ Tur Süresi: {(db.get_user(uid) or {}).get('loop_interval_seconds', 240)} saniye\nYeni süreyi saniye olarak gönder:", reply_markup=sub_menu_keyboard())
     elif action == "redeem":
         context.user_data["flow"] = "redeem"
-        await q.edit_message_text(
-            "🔑 KEY kodunu gönder.",
-            reply_markup=sub_menu_keyboard()
-        )
-
+        await q.edit_message_text("🔑 KEY kodunu gönder.", reply_markup=sub_menu_keyboard())
     elif action == "status":
-        user = db.get_user(uid)
-        user_sessions = list(SESSIONS.glob(f"{uid}_*.session"))
-        grp_int = user.get("interval_seconds", 3) if user and user.get("interval_seconds") is not None else 3
-        loop_int = user.get("loop_interval_seconds", 240) if user and user.get("loop_interval_seconds") is not None else 240
-        lic_status = "Aktif"
-
-        await q.edit_message_text(
-            "📊 SİSTEM DURUMU\n\n"
-            f"Kayıtlı Hesap Sayısı: {len(user_sessions)}\n"
-            f"Lisans Durumu: {lic_status}\n"
-            f"Grup Aralığı: {grp_int} saniye\n"
-            f"Tur Süresi: {loop_int} saniye",
-            reply_markup=get_keyboard(uid)
-        )
-
-    elif action == "admin":
-        if not is_admin(uid):
-            await q.edit_message_text("⛔ Yetkin yok.")
-            return
-
-        await q.edit_message_text(
-            "👑 YÖNETİCİ PANELİ",
-            reply_markup=admin_keyboard()
-        )
-
-    elif action == "key_create":
-        if not is_admin(uid):
-            await q.edit_message_text("⛔ Yetkin yok.")
-            return
-
+        await q.edit_message_text(f"📊 SİSTEM DURUMU\n\nKayıtlı Hesap Sayısı: {len(list(SESSIONS.glob(f'{uid}_*.session')))}\nLisans Durumu: Aktif", reply_markup=get_keyboard(uid))
+    elif action == "admin" and is_admin(uid): await q.edit_message_text("👑 YÖNETİCİ PANELİ", reply_markup=admin_keyboard())
+    elif action == "key_create" and is_admin(uid):
         context.user_data["flow"] = "key_days"
-        await q.edit_message_text(
-            "KEY süresini gün olarak gönder. Örnek: 30",
-            reply_markup=sub_menu_keyboard()
-        )
-
-    elif action == "key_list":
-        if not is_admin(uid):
-            await q.edit_message_text("⛔ Yetkin yok.")
-            return
-
+        await q.edit_message_text("KEY süresini gün olarak gönder. Örnek: 30", reply_markup=sub_menu_keyboard())
+    elif action == "key_list" and is_admin(uid):
         rows = db.list_licenses()
-        text = "📋 KEY LİSTESİ\n\n"
-
-        text += "\n".join(
-            f"{r['code']} | {r['duration_days']} gün | "
-            f"{'Kullanıldı' if r['is_used'] else 'Boş'}"
-            for r in rows
-        ) if rows else "Henüz KEY yok."
-
-        await q.edit_message_text(
-            text[:3900],
-            reply_markup=admin_keyboard()
-        )
-
+        text = "📋 KEY LİSTESİ\n\n" + ("\n".join(f"{r['code']} | {r['duration_days']} gün | {'Kullanıldı' if r['is_used'] else 'Boş'}" for r in rows) if rows else "Henüz KEY yok.")
+        await q.edit_message_text(text[:3900], reply_markup=admin_keyboard())
 
 async def text_handler(update, context):
-    uid = update.effective_user.id
-    text = update.effective_message.text.strip()
+    uid, text = update.effective_user.id, update.effective_message.text.strip()
     flow = context.user_data.get("flow")
-
-    if not flow:
-        return
+    if not flow: return
 
     if flow.startswith("acc_blacklist_"):
         session_name = flow.replace("acc_blacklist_", "")
-        clean_target = text.replace("https://t.me/", "").replace("t.me/", "").strip()
-        if not clean_target.startswith("@") and not clean_target.lstrip("-").isdigit():
-            clean_target = "@" + clean_target
-        clean_target = clean_target.lower()
-
-        if session_name not in account_blacklists:
-            account_blacklists[session_name] = set()
-            
-        account_blacklists[session_name].add(clean_target)
+        target = "@" + text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
+        if session_name not in account_blacklists: account_blacklists[session_name] = set()
+        account_blacklists[session_name].add(target)
         context.user_data.clear()
-
-        await update.effective_message.reply_text(
-            f"✅ **{clean_target}** hedefi sadece `{session_name}` hesabı için karalisteye eklendi.",
-            parse_mode="Markdown",
-            reply_markup=get_keyboard(uid)
-        )
-
+        await update.effective_message.reply_text(f"✅ **{target}** karalisteye eklendi.", parse_mode="Markdown", reply_markup=get_keyboard(uid))
     elif flow == "phone":
         if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
-            await update.effective_message.reply_text(
-                "Telefon numaranı +ülke koduyla gönder."
-            )
+            await update.effective_message.reply_text("Telefon numaranı +ülke koduyla gönder.")
             return
-
         session_name = f"{uid}_{text}"
-        client = TelegramClient(
-            str(SESSIONS / session_name), API_ID, API_HASH, connection_retries=None, auto_reconnect=True
-        )
+        client = TelegramClient(str(SESSIONS / session_name), API_ID, API_HASH, connection_retries=5, auto_reconnect=True)
         await client.connect()
-
         try:
             sent = await client.send_code_request(text)
-
-            pending[uid] = {
-                "client": client,
-                "phone": text,
-                "hash": sent.phone_code_hash,
-                "session_name": session_name
-            }
-
+            pending[uid] = {"client": client, "phone": text, "hash": sent.phone_code_hash, "session_name": session_name}
             context.user_data["flow"] = "code"
-
-            await update.effective_message.reply_text(
-                "Bu numaraya gelen Telegram doğrulama kodunu gönder:"
-            )
-
+            await update.effective_message.reply_text("Bu numaraya gelen Telegram doğrulama kodunu gönder:")
         except Exception:
             await client.disconnect()
-            log.exception("Kod gönderme hatası")
-            await update.effective_message.reply_text(
-                "Kod gönderilemedi. Ayarları kontrol et."
-            )
-
+            await update.effective_message.reply_text("Kod gönderilemedi. Ayarları kontrol et.")
     elif flow == "code":
         item = pending.get(uid)
         if not item:
             context.user_data.clear()
-            await update.effective_message.reply_text("İşlem sona erdi. /start ile yeniden başla.")
+            await update.effective_message.reply_text("Süre bitti. /start ile yeniden başla.")
             return
-
         try:
-            await item["client"].sign_in(
-                phone=item["phone"],
-                code=text,
-                phone_code_hash=item["hash"]
-            )
-            s_name = item["session_name"]
-            clients[s_name] = item["client"]
+            await item["client"].sign_in(phone=item["phone"], code=text, phone_code_hash=item["hash"])
+            clients[item["session_name"]] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
-
-            await update.effective_message.reply_text(
-                f"✅ **{item['phone']}** hesabı başarıyla eklendi!\n'Hesaplarım' menüsünden yönetebilirsin.",
-                reply_markup=get_keyboard(uid)
-            )
+            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı başarıyla eklendi!", reply_markup=get_keyboard(uid))
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
             await update.effective_message.reply_text("İki adımlı doğrulama (2FA) şifreni gönder:")
         except (PhoneCodeInvalidError, PhoneCodeExpiredError):
             await update.effective_message.reply_text("Kod geçersiz veya süresi dolmuş.")
         except Exception:
-            log.exception("Giriş hatası")
-            await update.effective_message.reply_text("Hesap bağlantısı tamamlanamadı.")
-
+            await update.effective_message.reply_text("Giriş tamamlanamadı.")
     elif flow == "2fa":
         item = pending.get(uid)
         if not item:
             context.user_data.clear()
-            await update.effective_message.reply_text("İşlem sona erdi. /start ile yeniden başla.")
+            await update.effective_message.reply_text("Süre bitti. /start ile yeniden başla.")
             return
-
         try:
             await item["client"].sign_in(password=text)
-            s_name = item["session_name"]
-            clients[s_name] = item["client"]
+            clients[item["session_name"]] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
-
-            await update.effective_message.reply_text(
-                "✅ Hesap başarıyla bağlandı!",
-                reply_markup=get_keyboard(uid)
-            )
+            await update.effective_message.reply_text("✅ Hesap başarıyla bağlandı!", reply_markup=get_keyboard(uid))
         except PasswordHashInvalidError:
             await update.effective_message.reply_text("Şifre hatalı. Tekrar dene.")
         except Exception:
-            log.exception("2FA hatası")
             await update.effective_message.reply_text("Giriş tamamlanamadı.")
-
     elif flow == "blacklist":
-        clean_target = text.replace("https://t.me/", "").replace("t.me/", "").strip()
-        if not clean_target.startswith("@") and not clean_target.lstrip("-").isdigit():
-            clean_target = "@" + clean_target
-        
-        clean_target = clean_target.lower()
-        
-        if uid not in blacklisted_groups:
-            blacklisted_groups[uid] = set()
-            
-        blacklisted_groups[uid].add(clean_target)
+        target = "@" + text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
+        if uid not in blacklisted_groups: blacklisted_groups[uid] = set()
+        blacklisted_groups[uid].add(target)
         context.user_data.clear()
-        
-        await update.effective_message.reply_text(
-            f"✅ **{clean_target}** genel engellenenler listesine eklendi.",
-            reply_markup=get_keyboard(uid)
-        )
-
-    elif flow == "interval_group":
+        await update.effective_message.reply_text(f"✅ **{target}** genel karalisteye eklendi.", reply_markup=get_keyboard(uid))
+    elif flow in ["interval_group", "interval_loop"]:
         try:
-            seconds = int(text)
-            if seconds < 0:
-                raise ValueError
-
-            db.set_user(uid, interval_seconds=seconds)
+            val = int(text)
+            if val < 0: raise ValueError
+            db.set_user(uid, **({ "interval_seconds": val } if flow == "interval_group" else { "loop_interval_seconds": val }))
             context.user_data.clear()
-
-            await update.effective_message.reply_text(
-                f"✅ Grup arası aralık kaydedildi: {seconds} saniye.",
-                reply_markup=get_keyboard(uid)
-            )
+            await update.effective_message.reply_text(f"✅ Süre başarıyla güncellendi: {val} saniye.", reply_markup=get_keyboard(uid))
         except ValueError:
-            await update.effective_message.reply_text("Lütfen 0 veya daha büyük bir sayı gir.")
-
-    elif flow == "interval_loop":
-        try:
-            seconds = int(text)
-            if seconds < 0:
-                raise ValueError
-
-            db.set_user(uid, loop_interval_seconds=seconds)
-            context.user_data.clear()
-
-            await update.effective_message.reply_text(
-                f"✅ Tur dinlenme süresi kaydedildi: {seconds} saniye.",
-                reply_markup=get_keyboard(uid)
-            )
-        except ValueError:
-            await update.effective_message.reply_text("Lütfen 0 veya daha büyük bir sayı gir.")
-
+            await update.effective_message.reply_text("Lütfen geçerli bir sayı gir.")
     elif flow == "redeem":
-        ok, message = db.use_license(uid, text)
+        ok, msg = db.use_license(uid, text)
         context.user_data.clear()
-
-        await update.effective_message.reply_text(
-            ("✅ " if ok else "❌ ") + message,
-            reply_markup=get_keyboard(uid)
-        )
-
-    elif flow == "key_days":
-        if not is_admin(uid):
-            context.user_data.clear()
-            await update.effective_message.reply_text("Yetkin yok.")
-            return
-
+        await update.effective_message.reply_text(("✅ " if ok else "❌ ") + msg, reply_markup=get_keyboard(uid))
+    elif flow == "key_days" and is_admin(uid):
         try:
             days = int(text)
-            if not 1 <= days <= 3650:
-                raise ValueError
-
-            alphabet = string.ascii_uppercase + string.digits
-            code = "FKD-" + "-".join(
-                "".join(secrets.choice(alphabet) for _ in range(4))
-                for _ in range(3)
-            )
-
+            if not 1 <= days <= 3650: raise ValueError
+            code = "FKD-" + "-".join("".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(4)) for _ in range(3))
             db.create_license(code, days)
             context.user_data.clear()
-
-            await update.effective_message.reply_text(
-                f"✅ KEY OLUŞTURULDU\n\n`{code}`\n\nSüre: {days} gün",
-                parse_mode="Markdown",
-                reply_markup=admin_keyboard()
-            )
+            await update.effective_message.reply_text(f"✅ KEY OLUŞTURULDU\n\n`{code}`\n\nSüre: {days} gün", parse_mode="Markdown", reply_markup=admin_keyboard())
         except ValueError:
             await update.effective_message.reply_text("1 ile 3650 arasında gün gir.")
 
-
 async def shutdown(app):
     for item in list(pending.values()):
-        try:
-            await item["client"].disconnect()
-        except Exception:
-            pass
-
+        try: await item["client"].disconnect()
+        except Exception: pass
     for client in list(clients.values()):
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-
+        try: await client.disconnect()
+        except Exception: pass
 
 def main():
     db.init_db()
-
     t = Thread(target=run_web)
     t.daemon = True
     t.start()
-
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_shutdown(shutdown)
-        .build()
-    )
-
+    app = Application.builder().token(BOT_TOKEN).post_shutdown(shutdown).build()
     app.add_handler(CommandHandler("start", lambda u, c: start(u, c)))
     app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
-    )
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
