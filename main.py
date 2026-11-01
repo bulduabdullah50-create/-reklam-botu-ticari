@@ -4,6 +4,7 @@ import asyncio
 import logging
 import secrets
 import string
+from threading import Thread
 from flask import Flask
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -108,7 +109,7 @@ async def sender_loop(uid, context, chat_id):
                 try:
                     messages = await client.get_messages("me", limit=1)
                     if not messages:
-                        try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] Kayıtlı Mesajlar boş! Gönderilecek reklam bulunamadى.")
+                        try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] Kayıtlı Mesajlar boş! Gönderilecek reklam bulunamadı.")
                         except Exception: pass
                         await client.disconnect()
                         continue
