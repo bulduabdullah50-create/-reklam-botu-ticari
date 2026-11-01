@@ -34,7 +34,6 @@ def init_db():
                     uid INTEGER PRIMARY KEY,
                     expires_at TIMESTAMP
                 )''')
-    # Hesap bazlı özel grup engelleme tablosu
     c.execute('''CREATE TABLE IF NOT EXISTS account_blacklist (
                     session_name TEXT,
                     group_id TEXT,
@@ -96,13 +95,6 @@ def add_account_blacklist_db(session_name, group_id):
     conn = get_db()
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO account_blacklist (session_name, group_id) VALUES (?, ?)", (session_name, group_id))
-    conn.commit()
-    conn.close()
-
-def remove_account_blacklist_db(session_name, group_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM account_blacklist WHERE session_name = ? AND group_id = ?", (session_name, group_id))
     conn.commit()
     conn.close()
 
@@ -196,4 +188,12 @@ def get_user_expiry(uid):
     c.execute("SELECT expires_at FROM user_licenses WHERE uid = ?", (uid,))
     row = c.fetchone()
     conn.close()
-    return row["expires_at"] if row and row["expires_at"] else "Süresi Yok"
+    return row["expires_at"] if row and row["expires_at"] else None
+
+def get_all_users():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT uid FROM users")
+    rows = c.fetchall()
+    conn.close()
+    return [r["uid"] for r in rows]
