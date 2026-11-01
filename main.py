@@ -100,7 +100,6 @@ async def sender_loop(uid, context, chat_id):
             if not has_valid_access(uid): break
             user = db.get_user(uid)
             
-            # Veritabanından ve Render environment'tan aktif oturumları al
             db_sessions = db.get_user_sessions_db(uid)
             active_sessions = [(s[0], s[1]) for s in db_sessions if s[1] and len(s[1].strip()) > 50]
             
@@ -110,7 +109,7 @@ async def sender_loop(uid, context, chat_id):
                         active_sessions.append((k, v))
 
             if not active_sessions:
-                try: await context.bot.send_message(chat_id=chat_id, text="❌ Veritabanında kayıtlı hesap bulunamadı! Lütfen 'Hesap Ekle' ile hesap bağlayın.")
+                try: await context.bot.send_message(chat_id=chat_id, text="❌ Aktif hesap bulunamadı! Lütfen 'Hesap Ekle' ile hesap bağlayın.")
                 except Exception: pass
                 await asyncio.sleep(15)
                 continue
@@ -123,8 +122,6 @@ async def sender_loop(uid, context, chat_id):
                 
                 client = await get_client_by_session_string(s_name, s_string)
                 if not client:
-                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] oturumu açılamadı. Lütfen hesabı silip yeniden ekleyin.")
-                    except Exception: pass
                     continue
 
                 try:
@@ -156,7 +153,7 @@ async def sender_loop(uid, context, chat_id):
                     continue
 
                 if not groups:
-                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] Bu hesapta hiç grup bulunamadı! Atlanıyor...")
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"⚠️ [{s_name}] Hiç grup bulunamadı! Atlanıyor...")
                     except Exception: pass
                     try: await client.disconnect()
                     except Exception: pass
@@ -349,7 +346,7 @@ async def text_handler(update, context):
             db.save_session_db(uid, s_name, s_string)
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı başarıyla bağlandı ve veritabanına kaydedildi!", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı başarıyla bağlandı ve kaydedildi!", reply_markup=get_keyboard(uid))
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
             await update.effective_message.reply_text("İki adımlı doğrulama (2FA) şifreni gönder:")
