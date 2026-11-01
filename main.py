@@ -5,7 +5,6 @@ import secrets
 import string
 import logging
 import gc
-import base64
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -18,7 +17,7 @@ import database as db
 
 app_web = Flask(__name__)
 @app_web.route('/')
-def home_web(): return "Bot aktif ve profesyonel modda çalışıyor!"
+def home_web(): return "Bot aktif ve korumalı modda çalışıyor!"
 def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
@@ -47,7 +46,7 @@ def sub_menu_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅
 def admin_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("➕ KEY Oluştur", callback_data="key_create")], [InlineKeyboardButton("📋 KEY Listesi", callback_data="key_list")], [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]])
 
 async def get_client_by_session_string(session_name, s_string):
-    """Oturum string'ini struct.error ve bozulmalara karşı kusursuz temizleyen profesyonel yükleyici"""
+    """Buffer ve uzunluk hatalarını yakalayıp botu çökertmeyen ultra zırhlı yükleyici"""
     client = clients.get(session_name)
     if client:
         try:
@@ -57,13 +56,15 @@ async def get_client_by_session_string(session_name, s_string):
         except Exception: clients.pop(session_name, None)
 
     try:
-        # Temizlik ve Padding (eksik karakter) tamamlama mekanizması
-        clean_string = s_string.strip().strip('"').strip("'").strip()
-        padding_needed = len(clean_string) % 4
-        if padding_needed:
-            clean_string += '=' * (4 - padding_needed)
+        # Tüm boşlukları, tırnakları ve görünmeyen satır sonlarını tamamen temizle
+        clean_string = s_string.strip().strip('"').strip("'").replace("\n", "").replace("\r", "").strip()
+        
+        # StringSession uzunluk ve buffer kontrolü (275 bayt hatasını önlemek için)
+        if len(clean_string) < 50:
+            log.error("Oturum string'i çok kısa (%s)", session_name)
+            return None
 
-        client = TelegramClient(StringSession(clean_string), API_ID, API_HASH, connection_retries=5, auto_reconnect=True, timeout=30)
+        client = TelegramClient(StringSession(clean_string), API_ID, API_HASH, connection_retries=3, auto_reconnect=True, timeout=30)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
@@ -71,7 +72,7 @@ async def get_client_by_session_string(session_name, s_string):
         clients[session_name] = client
         return client
     except Exception as e:
-        log.exception("Profesyonel Client yükleme hatası (%s): %s", session_name, e)
+        log.warning("Oturum yüklenirken hata yakalandı (%s): %s", session_name, e)
         return None
 
 async def show_home(update, context):
@@ -98,7 +99,7 @@ async def start_sender(uid, session_name, message_obj, context):
         await message_obj.reply_text("⚠️ Otomatik gönderim sistemi zaten arka planda çalışıyor.")
         return
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, message_obj.chat_id))
-    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Profesyonel Mod: Sadece Gruplar)")
+    await message_obj.reply_text("▶ **Otomatik Çoklu Hesap Motoru Başlatıldı!** (Zırhlı Mod: Sadece Gruplar)")
 
 async def sender_loop(uid, context, chat_id):
     task_key = f"{uid}_auto_all_accounts"
@@ -127,7 +128,7 @@ async def sender_loop(uid, context, chat_id):
                 
                 client = await get_client_by_session_string(s_name, s_string)
                 if not client:
-                    try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' oturumu yüklenemedi! Session string hatalı veya süresi dolmuş olabilir.")
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' oturumu yüklenemedi! Render environment üzerindeki string'i eksik veya tırnaklı eklemiş olabilirsin.")
                     except Exception: pass
                     continue
 
@@ -135,7 +136,7 @@ async def sender_loop(uid, context, chat_id):
                     if not client.is_connected(): await client.connect()
                     messages = await client.get_messages("me", limit=1)
                     if not messages:
-                        try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' hesabının Kayıtlı Mesajlar'ı boş! Lütfen reklam metni ekle.")
+                        try: await context.bot.send_message(chat_id=chat_id, text=f"❌ '{s_name}' hesabının Kayıtlı Mesajlar'ı boş!")
                         except Exception: pass
                         await client.disconnect()
                         continue
@@ -148,7 +149,7 @@ async def sender_loop(uid, context, chat_id):
 
                 ad_text = getattr(source_msg, 'text', '') or getattr(source_msg, 'message', '') or "Reklam İçeriği"
                 
-                # --- PROFESYONEL GRUP FİLTRELEME (KANALLAR KESİNLİKLE KAPALI) ---
+                # --- GRUP FİLTRELEME (KANALLAR KESİNLİKLE KAPALI) ---
                 try:
                     groups = []
                     async for dialog in client.iter_dialogs():
@@ -190,7 +191,7 @@ async def sender_loop(uid, context, chat_id):
                         success_count += 1
                         detay_listesi.append(f"✅ Başarılı: {g_title}")
                     except FloodWaitError as exc:
-                        log.warning("Flood sınırı yakalandı: %s sn", exc.seconds)
+                        log.warning("Flood sınırı: %s sn", exc.seconds)
                         detay_listesi.append(f"⏳ Flood Sınırı ({exc.seconds}sn): {g_title}")
                         await asyncio.sleep(exc.seconds + 5)
                     except Exception as e:
@@ -217,7 +218,7 @@ async def sender_loop(uid, context, chat_id):
             current_loop_interval = fresh_user.get("loop_interval_seconds", 240) if fresh_user and fresh_user.get("loop_interval_seconds") is not None else 240
 
             try:
-                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Belirttiğin süre olan {current_loop_interval} saniye mola bekleniyor...")
+                await context.bot.send_message(chat_id=chat_id, text=f"⏳ Tüm hesaplar turunu tamamladı. Belirttiğin süre olan {current_loop_interval} saniye bekleniyor...")
             except Exception: pass
             
             gc.collect()
@@ -226,7 +227,7 @@ async def sender_loop(uid, context, chat_id):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("Döngü genel hatası: %s", e)
+            log.exception("Döngü hatası: %s", e)
             await asyncio.sleep(10)
             
     tasks.pop(task_key, None)
@@ -346,7 +347,7 @@ async def text_handler(update, context):
             clients[s_name] = item["client"]
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı bağlandı!\n\n🔑 **Kalıcılık için Önemli Not:** Render panelinde **Environment** bölümüne şu bilgiyi ekle:\nKey: `{s_name}`\nValue: `{s_string}`", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ **{item['phone']}** hesabı bağlandı!\n\n🔑 **Kalıcılık için Önemli Not:** Render panelinde **Environment** bölümüne şunu ekle:\nKey: `{s_name}`\nValue: `{s_string}`", reply_markup=get_keyboard(uid))
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
             await update.effective_message.reply_text("İki adımlı doğrulama (2FA) şifreni gönder:")
