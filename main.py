@@ -1,78 +1,67 @@
+import os
+import re
 import asyncio
 import logging
-import sqlite3
-from aiogram import Bot, Dispatcher, F, Router, types
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+import secrets
+import string
+import datetime
+from threading import Thread
+from flask import Flask
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError
+from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+import database as db
 
-# -----------------------------------------------------------------------------
-# AYARLAR VE YAPILANDIRMA
-# -----------------------------------------------------------------------------
-API_TOKEN = "TELEGRAM_BOT_TOKENINIZI_BURAYA_YAZIN"  # Bot Token
-ADMIN_USERNAME = "farketmezda"  # Lisans verme ve yönetme yetkisi olan tek hesap
+app_web = Flask(__name__)
+@app_web.route('/')
+def home_web(): return "💎 FARKETMEZDA PLATINUM REKLAM BOTU AKTİF!"
+def run_web(): app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 logging.basicConfig(level=logging.INFO)
-router = Router()
+log = logging.getLogger("farketmezda")
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+ADMIN_ID = int(os.environ["ADMIN_ID"])
+
+clients, pending, tasks, blacklisted_groups, failed_reports_cache = {}, {}, {}, {}, {}
+
+def is_admin(uid): return int(uid) == ADMIN_ID
+def has_valid_access(uid): return is_admin(uid) or db.license_valid(uid, ADMIN_ID)
 
 # -----------------------------------------------------------------------------
-# VERİTABANI BAŞLANGICI VE TABLOLAR
+# ŞIK ANA PANEL (GEREKSİZ TEKNİK DETAYLARDAN ARINDIRILMIŞ PROFESYONEL GÖRÜNÜM)
 # -----------------------------------------------------------------------------
-def init_db():
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
+def get_keyboard(uid):
+    rows = [
+        [InlineKeyboardButton("💎 ABONELİK & FİYATLAR", callback_data="pricing_panel")],
+        [InlineKeyboardButton("➕ Hesap Ekle", callback_data="add"), InlineKeyboardButton("👤 Hesaplarım", callback_data="accounts")],
+        [InlineKeyboardButton("▶️ Başlat / ⏹ Durdur", callback_data="start_stop_menu")],
+        [InlineKeyboardButton("📩 Hesaba Özel Metin & Süreler", callback_data="account_config_menu")],
+        [InlineKeyboardButton("📊 Başarısız Raporlar", callback_data="failed_reports")],
+        [InlineKeyboardButton("📖 Kurulum & Ödeme Rehberi", callback_data="guide_menu")],
+        [InlineKeyboardButton("🚫 Genel Grup Engel", callback_data="blacklist"), InlineKeyboardButton("🔑 KEY Aktif Et", callback_data="redeem")],
+        [InlineKeyboardButton("💬 Canlı Destek", url="https://t.me/farketmezda")]
+    ]
+    if is_admin(uid):
+        rows.append([InlineKeyboardButton("👑 YÖNETİCİ LİSANS İPTAL & YÖNETİM PANELİ", callback_data="admin")])
+    return InlineKeyboardMarkup(rows)
 
-    # Lisans / Key Tablosu
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS licenses (
-            key TEXT PRIMARY KEY,
-            tier TEXT,
-            status TEXT DEFAULT 'active'
-        )
-    """)
+def sub_menu_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")]])
 
-    # Hesaplar Tablosu (StringSession ve Özel Ayarlar)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            phone TEXT,
-            username TEXT,
-            session_string TEXT,
-            message TEXT DEFAULT '',
-            delay INTEGER DEFAULT 3,
-            cooldown INTEGER DEFAULT 300,
-            status TEXT DEFAULT 'stopped'
-        )
-    """)
+def admin_keyboard(): return InlineKeyboardMarkup([
+    [InlineKeyboardButton("➕ KEY Üret", callback_data="key_create"), InlineKeyboardButton("📋 KEY İptal/Yönetim", callback_data="key_list")],
+    [InlineKeyboardButton("📢 Duyuru Geç", callback_data="admin_broadcast")],
+    [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]
+])
 
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# -----------------------------------------------------------------------------
-# FSM STATE (DURUM) YÖNETİMİ
-# -----------------------------------------------------------------------------
-class AdminState(StatesGroup):
-    waiting_for_key_action = State()
-
-class AccountState(StatesGroup):
-    waiting_for_phone = State()
-    waiting_for_code = State()
-    waiting_for_password = State()
-    waiting_for_message = State()
-    waiting_for_delays = State()
-
-# -----------------------------------------------------------------------------
-# ANA PANEL VE BAŞLANGIÇ (START) EKRANI
-# -----------------------------------------------------------------------------
-@router.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def show_home(update, context):
+    uid = update.effective_user.id
+    db.ensure_user(uid, update.effective_user.username)
+    
     text = (
         "⚡ **FARKETMEZDA PLATINUM OTO REKLAM** ⚡\n"
         "_Sınırsız Güç, Kesintisiz Tanıtım Altyapısı_\n\n"
@@ -82,26 +71,21 @@ async def cmd_start(message: types.Message):
         "Aşağıdaki yönetim panelinden hesaplarınızı bağlayabilir, reklam akışını başlatabilir "
         "veya durdurabilirsiniz. Tüm işlemleriniz güvenli altyapımızla koruma altındadır. 👇"
     )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=get_keyboard(uid))
+    else:
+        await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=get_keyboard(uid))
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Hesaplarım & Yönetim", callback_data="accounts_menu")],
-        [InlineKeyboardButton(text="▶️ Başlat / ⏹ Durdur", callback_data="start_stop_menu")],
-        [InlineKeyboardButton(text="📊 Başarısız Raporlar", callback_data="failed_reports")],
-        [InlineKeyboardButton(text="📖 Kurulum & Ödeme Rehberi", callback_data="guide_menu")],
-    ])
-
-    if message.from_user.username == ADMIN_USERNAME:
-        keyboard.inline_keyboard.append(
-            [InlineKeyboardButton(text="🔑 Admin Lisans Paneli", callback_data="admin_panel")]
-        )
-
-    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+async def start(update, context):
+    context.user_data.clear()
+    await show_home(update, context)
 
 # -----------------------------------------------------------------------------
 # KURULUM & ÖDEME REHBERİ
 # -----------------------------------------------------------------------------
-@router.callback_query(F.data == "guide_menu")
-async def show_guide(callback: types.CallbackQuery):
+async def show_guide(update, context):
+    q = update.callback_query
     guide_text = (
         "📖 **FARKETMEZDA PLATINUM | KURULUM VE ÖDEME REHBERİ**\n\n"
         "> **1️⃣ Nasıl Satın Alınır ve Ödeme Nasıl Yapılır?**\n"
@@ -110,228 +94,543 @@ async def show_guide(callback: types.CallbackQuery):
         "• Ödemeniz onaylandığı anda size özel **Lisans Keyi** anında tanımlanır.\n\n"
         "> **2️⃣ Bot Nasıl Kurulur ve Aktif Edilir?**\n"
         "• **Adım 1:** Lisans keyinizi ilgili alana girerek aktive edin.\n"
-        "• **Adım 2:** \"Hesaplarım\" menüsünden Telegram hesaplarınızı bağlayın. (Hesabınızın üstünde kullanıcı adınız görünür).\n"
+        "• **Adım 2:** \"Hesaplarım\" menüsünden Telegram hesaplarınızı bağlayın. (Hesabınızın üstünde kullanıcı adınız net olarak görünür).\n"
         "• **Adım 3:** Her hesaba özel **reklam metninizi** ister Kayıtlı Mesajlar'dan ister panelden ayrı ayrı ayarlayın.\n"
-        "• **Adım 4:** Grup arası bekleme sürelerini ve tur dinlenme aralıklarını yapılandırın.\n"
-        "• **Adım 5:** Ana paneldeki **Başlat/Durdur** komutlarıyla reklam akışını yönetin!\n\n"
+        "• **Adım 4:** Grup arası bekleme sürelerini ve tur dinlenme aralıklarını her numara için ayrı yapılandırın.\n"
+        "• **Adım 5:** Ana paneldeki **Başlat/Durdur** butonlarıyla reklam akışını yönetin!\n\n"
         "⚠️ **Güvenlik:** Akıllı risk koruması ile spam anında süreler otomatik güvenliye alınır."
     )
-    
-    back_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Ana Menü", callback_data="main_menu")]
-    ])
-    await callback.message.edit_text(guide_text, reply_markup=back_kb, parse_mode="Markdown")
-    await callback.answer()
+    await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# -----------------------------------------------------------------------------
-# ADMIN LİSANS YÖNETİMİ (OLUŞTURMA VE İPTAL ETME)
-# -----------------------------------------------------------------------------
-@router.callback_query(F.data == "admin_panel")
-async def admin_panel(callback: types.CallbackQuery):
-    if callback.from_user.username != ADMIN_USERNAME:
-        await callback.answer("Bu alana sadece admin erişebilir!", show_alert=True)
+# --- REKLAM GÖNDERİM MOTORU (AKILLI SPAM KORUMASI & HESABA ÖZEL AYARLAR) ---
+async def start_sender(uid, chat_id, context, target_s_name=None):
+    if not has_valid_access(uid):
+        return
+    
+    task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
+    if task_key in tasks and not tasks[task_key].done():
         return
 
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT key, tier, status FROM licenses")
-    licenses = cursor.fetchall()
-    conn.close()
+    tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
 
-    text = "🔑 **Admin Lisans Yönetim Paneli**\n\nAktif veya pasif keyler aşağıdadır:"
-    
-    keyboard_buttons = []
-    for key, tier, status in licenses:
-        icon = "🟢" if status == 'active' else "🔴"
-        keyboard_buttons.append([
-            InlineKeyboardButton(text=f"{icon} {key} ({tier})", callback_data=f"ignored"),
-            InlineKeyboardButton(text="🗑 İptal Et/Sil", callback_data=f"rev_key_{key}")
-        ])
-
-    keyboard_buttons.append([InlineKeyboardButton(text="➕ Yeni Key Üret", callback_data="gen_key_menu")])
-    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Ana Menü", callback_data="main_menu")])
-
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons), parse_mode="Markdown")
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("rev_key_"))
-async def revoke_key(callback: types.CallbackQuery):
-    if callback.from_user.username != ADMIN_USERNAME:
-        return
-    key_to_rev = callback.data.replace("rev_key_", "")
-    
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE licenses SET status = 'revoked' WHERE key = ?", (key_to_rev,))
-    conn.commit()
-    conn.close()
-
-    await callback.answer(f"🔑 Key başarıyla iptal edildi: {key_to_rev}", show_alert=True)
-    await admin_panel(callback)
-
-# -----------------------------------------------------------------------------
-# HESAPLARIM VE KULLANICI ADI GÖRÜNÜMÜ
-# -----------------------------------------------------------------------------
-@router.callback_query(F.data == "accounts_menu")
-async def accounts_menu(callback: types.CallbackQuery):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, phone, username, status FROM accounts WHERE user_id = ?", (callback.from_user.id,))
-    accounts = cursor.fetchall()
-    conn.close()
-
-    text = "📱 **Hesap Yönetim Paneli**\n\nKayıtlı hesaplarınız ve kullanıcı adlarınız aşağıdadır:"
-    
-    keyboard = []
-    for acc_id, phone, username, status in accounts:
-        display_name = f"@{username}" if username else "Kullanıcı Adı Yok"
-        status_icon = "🟢 Çalışıyor" if status == 'running' else "🔴 Durduruldu"
-        keyboard.append([
-            InlineKeyboardButton(text=f"{display_name} | {phone} ({status_icon})", callback_data=f"acc_detail_{acc_id}")
-        ])
-
-    keyboard.append([InlineKeyboardButton(text="➕ Yeni Hesap Ekle", callback_data="add_account")])
-    keyboard.append([InlineKeyboardButton(text="🔙 Ana Menü", callback_data="main_menu")] )
-
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
-    await callback.answer()
-
-# -----------------------------------------------------------------------------
-# ANA PANELDEKİ BAŞLAT / DURDUR KONTROLÜ
-# -----------------------------------------------------------------------------
-@router.callback_query(F.data == "start_stop_menu")
-async def start_stop_menu(callback: types.CallbackQuery):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, phone, username, status FROM accounts WHERE user_id = ?", (callback.from_user.id,))
-    accounts = cursor.fetchall()
-    conn.close()
-
-    text = "▶️ **Reklam Başlat / Durdur Kontrol Paneli**\n\nYönetmek istediğiniz hesabı seçin:"
-    
-    keyboard = []
-    for acc_id, phone, username, status in accounts:
-        display_name = f"@{username}" if username else phone
-        if status == 'running':
-            keyboard.append([InlineKeyboardButton(text=f"⏹ Durdur: {display_name}", callback_data=f"stop_acc_{acc_id}")])
-        else:
-            keyboard.append([InlineKeyboardButton(text=f"▶️ Başlat: {display_name}", callback_data=f"start_acc_{acc_id}")])
-
-    keyboard.append([InlineKeyboardButton(text="🔙 Ana Menü", callback_data="main_menu")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
-    await callback.answer()
-
-# -----------------------------------------------------------------------------
-# AKILLI SPAM / RİSK KORUMASI VE REKLAM MOTORU
-# -----------------------------------------------------------------------------
-@router.callback_query(F.data.startswith("start_acc_"))
-async def start_account_advertising(callback: types.CallbackQuery):
-    acc_id = int(callback.data.replace("start_acc_", ""))
-    
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE accounts SET status = 'running' WHERE id = ?", (acc_id,))
-    cursor.execute("SELECT session_string, message, delay, cooldown, phone FROM accounts WHERE id = ?", (acc_id,))
-    acc_data = cursor.fetchone()
-    conn.commit()
-    conn.close()
-
-    if not acc_data:
-        await callback.answer("Hesap bulunamadı!", show_alert=True)
-        return
-
-    session_string, custom_message, delay, cooldown, phone = acc_data
-    await callback.answer(f"🚀 {phone} numaralı hesap ile reklam akışı başlatıldı!", show_alert=True)
-
-    # Arka planda güvenli reklam ve akıllı spam koruması döngüsü
-    asyncio.create_task(run_smart_advertising(acc_id, session_string, custom_message, delay, cooldown, callback.bot, callback.from_user.id))
-
-@router.callback_query(F.data.startswith("stop_acc_"))
-async def stop_account_advertising(callback: types.CallbackQuery):
-    acc_id = int(callback.data.replace("stop_acc_", ""))
-    
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE accounts SET status = 'stopped' WHERE id = ?", (acc_id,))
-    conn.commit()
-    conn.close()
-
-    await callback.answer("⏹ Hesap reklam akışı durduruldu.", show_alert=True)
-    await start_stop_menu(callback)
-
-async def run_smart_advertising(acc_id, session_string, message_text, base_delay, cooldown, bot_instance, user_id):
-    client = TelegramClient(str(acc_id), "API_ID", "API_HASH") # Kendi Telethon API bilgilerinizi yazınız
-    failed_groups = []
-    
-    try:
-        await client.connect()
-        
-        # Örnek Grup Gönderim Döngüsü (Sadece Gruplar, Kanallar Hariç tutulur)
-        async for dialog in client.iter_dialogs():
-            # Veritabanından hesap durumunu kontrol et (Durduruldu mu?)
-            conn = sqlite3.connect("bot_database.db")
-            cursor = conn.cursor()
-            cursor.execute("SELECT status FROM accounts WHERE id = ?", (acc_id,))
-            st = cursor.fetchone()
-            conn.close()
-            if not st or st[0] == 'stopped':
+async def sender_loop(uid, context, chat_id, target_s_name=None):
+    task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
+    while True:
+        try:
+            if not has_valid_access(uid):
                 break
 
-            if dialog.is_group:
+            db_sessions = db.get_user_sessions_db(uid)
+            if target_s_name:
+                active_sessions = [(s[0], s[1], s[2]) for s in db_sessions if s[0] == target_s_name and s[2] and len(s[2].strip()) > 50]
+            else:
+                active_sessions = [(s[0], s[1], s[2]) for s in db_sessions if s[2] and len(s[2].strip()) > 50]
+
+            if not active_sessions:
+                await asyncio.sleep(20)
+                if target_s_name: break
+                continue
+
+            for s_name, phone, s_string in active_sessions:
+                if task_key not in tasks: break
+                
+                client = None
                 try:
-                    # Telegram Premium Emoji / Simge Destekli Gönderim
-                    await client.send_message(dialog.entity, message_text, parse_mode='md')
-                    await asyncio.sleep(base_delay)
-                except FloodWaitError as e:
-                    # ⚠️ AKILLI SPAM / RİSK KORUMASI DEVREDE
-                    logging.warning(f"Spam riski algılandı! FloodWait: {e.seconds} saniye. Süreler otomatik güncelleniyor.")
-                    await bot_instance.send_message(
-                        user_id, 
-                        f"⚠️ **Akıllı Koruma Uyarısı!** Hesap spam sınırına yaklaştı. Süreler otomatik artırılarak hesap korumaya alındı."
-                    )
-                    # Süreyi geçici olarak güvenli seviyeye çıkar
-                    await asyncio.sleep(e.seconds + 10)
-                except Exception as ex:
-                    failed_groups.append(dialog.name)
-                    logging.error(f"Grup gönderim hatası ({dialog.name}): {ex}")
+                    clean_string = s_string.strip().strip('"').strip("'").replace("\n", "").strip()
+                    client = TelegramClient(StringSession(clean_string), API_ID, API_HASH, connection_retries=3, auto_reconnect=True, timeout=30)
+                    await client.connect()
+                    
+                    if not await client.is_user_authorized():
+                        await client.disconnect()
+                        continue
+                except Exception:
+                    continue
+
+                # Hesaba özel metin veya genel metin / Kayıtlı Mesajlar
+                custom_text = db.get_account_custom_text(s_name) or db.get_user(uid).get("custom_ad_text", "").strip()
+                ad_text = ""
+                if custom_text:
+                    ad_text = custom_text
+                else:
+                    try:
+                        messages = await client.get_messages("me", limit=1)
+                        if messages:
+                            ad_text = getattr(messages[0], 'text', '') or getattr(messages[0], 'message', '')
+                    except:
+                        pass
+                
+                if not ad_text:
+                    await client.disconnect()
+                    continue
+
+                try:
+                    groups = []
+                    async for dialog in client.iter_dialogs():
+                        if dialog.is_group or (dialog.is_channel and getattr(dialog.entity, 'megagroup', False)):
+                            groups.append(dialog)
+                except Exception:
+                    await client.disconnect()
+                    continue
+
+                if not groups:
+                    await client.disconnect()
+                    continue
+
+                user_bl = blacklisted_groups.get(uid, set())
+                acc_bl_ids = set(db.get_account_blacklist_db(s_name))
+                success_count, fail_count, skipped_count = 0, 0, 0
+                failed_group_list = []
+
+                # Hesaba özel grup arası bekleme ve tur dinlenme süreleri
+                group_interval = db.get_account_delay(s_name) or db.get_user(uid).get("interval_seconds", 3)
+                loop_interval = db.get_account_loop(s_name) or db.get_user(uid).get("loop_interval_seconds", 240)
+
+                for group in groups:
+                    if task_key not in tasks: break
+                    g_id, g_title = str(group.id), getattr(group, 'title', 'Grup')
+                    entity = getattr(group, 'entity', None)
+                    g_username = f"@{entity.username}".lower() if entity and getattr(entity, 'username', None) else ""
+
+                    if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl_ids:
+                        skipped_count += 1
+                        continue
+                    
+                    try:
+                        # 💎 Telegram Premium Emoji / Simge Destekli Gönderim (Birebir Kayıpsız)
+                        await client.send_message(group.id, ad_text, parse_mode='md')
+                        success_count += 1
+                    except FloodWaitError as exc:
+                        # ⚠️ AKILLI SPAM / RİSK KORUMASI DEVREDE
+                        log.warning(f"Spam riski algılandı! FloodWait: {exc.seconds} saniye. Süreler otomatik artırılıyor.")
+                        try:
+                            await context.bot.send_message(
+                                chat_id=chat_id, 
+                                text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** Hesap spam sınırına yaklaştı. Süreler otomatik artırılarak hesap korumaya alındı."
+                            )
+                        except: pass
+                        
+                        await asyncio.sleep(exc.seconds + 10)
+                        try:
+                            await client.send_message(group.id, ad_text, parse_mode='md')
+                            success_count += 1
+                        except:
+                            fail_count += 1
+                            failed_group_list.append(g_title)
+                    except Exception:
+                        fail_count += 1
+                        failed_group_list.append(g_title)
+                    
+                    if group_interval > 0: 
+                        await asyncio.sleep(group_interval)
+
+                # Başarısız grupları rapor için hafızaya kaydet
+                failed_reports_cache[s_name] = failed_group_list
+
+                report_text = (
+                    f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
+                    f"✅ Başarılı: {success_count} | ❌ Hatalı: {fail_count} | 🚫 Atlanan: {skipped_count}"
+                )
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=report_text, parse_mode="Markdown")
+                except: pass
+
+                try: await client.disconnect()
+                except: pass
+
+                if target_s_name:
+                    break
+
+                await asyncio.sleep(loop_interval)
+
+            if target_s_name:
+                break
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.exception("Döngü hatası: %s", e)
+            await asyncio.sleep(15)
+            
+    tasks.pop(task_key, None)
+
+async def stop_sender(uid, chat_id, context, target_s_name=None):
+    task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
+    task = tasks.get(task_key)
+    if task and not task.done():
+        task.cancel()
+        tasks.pop(task_key, None)
+    await context.bot.send_message(chat_id=chat_id, text="⏹ **Seçilen hesap için reklam otomasyonu durduruldu.**")
+
+async def resume_active_users_background(application):
+    await asyncio.sleep(5)
+    running_users = db.get_all_running_users()
+    for uid in running_users:
+        if db.license_valid(uid, ADMIN_ID):
+            try:
+                class DummyContext:
+                    def __init__(self, bot):
+                        self.bot = bot
+                tasks[f"{uid}_auto_all_accounts"] = asyncio.create_task(sender_loop(uid, DummyContext(application.bot), uid))
+                log.info(f"Kullanıcı {uid} otomatik olarak kaldığı yerden başlatıldı.")
+            except Exception as e:
+                log.error(f"Kullanıcı {uid} başlatılamadı: {e}")
+
+async def post_init(application):
+    asyncio.create_task(resume_active_users_background(application))
+
+# --- CALLBACK VE ARAYÜZ YÖNETİMİ ---
+async def button(update, context):
+    q = update.callback_query
+    await q.answer()
+    uid, action = q.from_user.id, q.data
+    db.ensure_user(uid, q.from_user.username)
+
+    if action == "home": 
+        await q.edit_message_text("✨ FARKETMEZDA PLATINUM PANEL", reply_markup=get_keyboard(uid))
+    
+    elif action == "guide_menu":
+        await show_guide(update, context)
+
+    elif action == "pricing_panel":
+        text = (
+            "💎 **ABONELİK VE FİYAT LİSTESİ**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📅 **Günlük Paket:** 200 TL\n"
+            "📆 **Haftalık Paket:** 400 TL\n"
+            "🗓 **Aylık Paket:** 1000 TL\n\n"
+            "Satın almak istediğiniz paketi seçin:"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Günlük (200 TL) Satın Al", callback_data="buy_daily")],
+            [InlineKeyboardButton("💳 Haftalık (400 TL) Satın Al", callback_data="buy_weekly")],
+            [InlineKeyboardButton("💳 Aylık (1000 TL) Satın Al", callback_data="buy_monthly")],
+            [InlineKeyboardButton("🔑 KEY'im Var (Kod Gir)", callback_data="redeem")],
+            [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]
+        ])
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    elif action in ["buy_daily", "buy_weekly", "buy_monthly"]:
+        p_name, p_price, days = ("Günlük Paket", "200 TL", 1) if action == "buy_daily" else (("Haftalık Paket", "400 TL", 7) if action == "buy_weekly" else ("Aylık Paket", "1000 TL", 30))
+        context.user_data["pending_buy_days"] = days
+        context.user_data["pending_buy_name"] = p_name
+
+        pay_text = (
+            f"💳 **ÖDEME BİLDİRİMİ VE DETAYLARI**\n"
+            f"📦 Paket: **{p_name}** | Tutar: **{p_price}**\n\n"
+            f"🏦 **İBAN:** `TR100006200091000006969709`\n"
+            f"• **Alıcı:** Garanti Ödeme ve Elektronik Para Hizmetleri A.Ş.\n"
+            f"• **Açıklama:** `TAMİ7696919784875077`\n\n"
+            f"⚠️ Açıklamaya kodu yazıp ödemeyi yaptıktan sonra dekont gönderin."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Dekont Gönder", callback_data="send_receipt_prompt")],
+            [InlineKeyboardButton("⬅ Geri", callback_data="pricing_panel")]
+        ])
+        await q.edit_message_text(pay_text, parse_mode="Markdown", reply_markup=kb)
+
+    elif action == "send_receipt_prompt":
+        context.user_data["flow"] = "awaiting_receipt"
+        await q.edit_message_text("📤 Lütfen yaptığınız ödemenin **dekont fotoğrafını** bota doğrudan gönderin:", reply_markup=sub_menu_keyboard())
+
+    elif action == "add":
+        if not has_valid_access(uid):
+            await q.edit_message_text("❌ Aktif lisansınız yok.", reply_markup=sub_menu_keyboard())
+            return
+        context.user_data["flow"] = "phone"
+        await q.edit_message_text("➕ Telefon numaranızı +ülke kodu ile gönderin (`+90...`):", parse_mode="Markdown", reply_markup=sub_menu_keyboard())
+
+    elif action == "accounts":
+        db_sessions = db.get_user_sessions_db(uid)
+        if not db_sessions:
+            await q.edit_message_text("👤 Kayıtlı hesabınız yok.", reply_markup=get_keyboard(uid))
+            return
+        # 3. Kural: Numaranın üstünde hesap kullanıcı adı net olarak görünür
+        rows = []
+        for s_name, phone, _ in db_sessions:
+            uname = db.get_account_username(s_name)
+            display_str = f"@{uname} | {phone}" if uname else f"Kullanıcı Adı Yok | {phone}"
+            rows.append([InlineKeyboardButton(f"📱 {display_str}", callback_data=f"manage_{s_name}")])
+        rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+        await q.edit_message_text("👤 **HESAPLARIM VE KULLANICI ADLARI**", reply_markup=InlineKeyboardMarkup(rows))
+
+    elif action.startswith("manage_"):
+        s_name = action.replace("manage_", "")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶ Başlat", callback_data=f"start_one_{s_name}"), InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_one_{s_name}")],
+            [InlineKeyboardButton("✍️ Bu Hesaba Özel Metin Gir", callback_data=f"set_acc_text_{s_name}")],
+            [InlineKeyboardButton("⏱ Bu Hesabın Sürelerini Ayarla", callback_data=f"set_acc_times_{s_name}")],
+            [InlineKeyboardButton("🚫 Gruba Özel Engel", callback_data=f"acc_bl_{s_name}")],
+            [InlineKeyboardButton("❌ Hesabı Sil", callback_data=f"del_{s_name}")],
+            [InlineKeyboardButton("⬅ Geri", callback_data="accounts")]
+        ])
+        await q.edit_message_text("📱 **Hesap Yönetim Paneli**", reply_markup=kb)
+
+    elif action.startswith("start_one_"):
+        s_name = action.replace("start_one_", "")
+        await start_sender(uid, q.message.chat_id, context, target_s_name=s_name)
+        await q.message.reply_text("▶ **Seçilen hesap için reklam başlatıldı!**")
+
+    elif action.startswith("stop_one_"):
+        s_name = action.replace("stop_one_", "")
+        await stop_sender(uid, q.message.chat_id, context, target_s_name=s_name)
+
+    elif action.startswith("set_acc_text_"):
+        s_name = action.replace("set_acc_text_", "")
+        context.user_data["flow"] = f"acc_text_input_{s_name}"
+        await q.edit_message_text("✍️ Bu hesabın göndereceği **özel reklam metnini** yazın:", reply_markup=sub_menu_keyboard())
+
+    elif action.startswith("set_acc_times_"):
+        s_name = action.replace("set_acc_times_", "")
+        context.user_data["flow"] = f"acc_times_input_{s_name}"
+        await q.edit_message_text("⏱ Bu hesap için **grup arası bekleme süresini (saniye)** yazın:", reply_markup=sub_menu_keyboard())
+
+    elif action == "start_stop_menu":
+        db_sessions = db.get_user_sessions_db(uid)
+        if not db_sessions:
+            await q.edit_message_text("❌ Yönetilecek hesabınız yok.", reply_markup=get_keyboard(uid))
+            return
+        rows = []
+        for s_name, phone, _ in db_sessions:
+            uname = db.get_account_username(s_name)
+            disp = f"@{uname}" if uname else phone
+            rows.append([
+                InlineKeyboardButton(f"▶ Başlat: {disp}", callback_data=f"start_one_{s_name}"),
+                InlineKeyboardButton(f"⏹ Durdur: {disp}", callback_data=f"stop_one_{s_name}")
+            ])
+        rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+        await q.edit_message_text("▶️ **ANA PANELDEN BAŞLAT / DURDUR KONTROLÜ**", reply_markup=InlineKeyboardMarkup(rows))
+
+    elif action == "failed_reports":
+        db_sessions = db.get_user_sessions_db(uid)
+        report_lines = ["📊 **BAŞARISIZ GÖNDERİM RAPORLARI**\n"]
+        for s_name, phone, _ in db_sessions:
+            fails = failed_reports_cache.get(s_name, [])
+            report_lines.append(f"📱 `{phone}` -> Başarısız Grup Sayısı: {len(fails)}")
+            if fails:
+                report_lines.append(f"  • Hata Alınanlar: {', '.join(fails[:5])}")
         
-        # Başarısız grupları veritabanına ya da geçici rapora kaydetme mantığı
-        if failed_groups:
-            logging.info(f"Gönderilemeyen grup sayısı: {len(failed_groups)}")
+        await q.edit_message_text("\n".join(report_lines), parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-    except Exception as e:
-        logging.error(fOturum Hatası: {e})
-    finally:
-        await client.disconnect()
-        # İş bittiğinde statüyü durduruldu yap
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("UPDATE accounts SET status = 'stopped' WHERE id = ?", (acc_id,))
-        conn.commit()
-        conn.close()
-        await bot_instance.send_message(user_id, f"🏁 Hesap reklam turunu tamamladı ve durduruldu.")
+    elif action.startswith("acc_bl_"):
+        s_name = action.replace("acc_bl_", "")
+        context.user_data["flow"] = f"acc_blacklist_add_{s_name}"
+        await q.edit_message_text("🚫 Bu hesabın mesaj atmayacağı grubun linkini veya kullanıcı adını gönderin:", reply_markup=sub_menu_keyboard())
 
-# -----------------------------------------------------------------------------
-# BAŞARISIZ GRUP RAPORLAMA
-# -----------------------------------------------------------------------------
-@router.callback_query(F.data == "failed_reports")
-async def show_failed_reports(callback: types.CallbackQuery):
-    text = (
-        "📊 **Başarısız Gönderim Raporları**\n\n"
-        "Son reklam turunda mesaj iletilemeyen veya kısıtlı olan grupların listesi:\n"
-        "• _Şu an için hata alınan kayıt bulunmuyor, sistem akıcı çalışıyor._"
-    )
-    back_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Ana Menü", callback_data="main_menu")]
-    ])
-    await callback.message.edit_text(text, reply_markup=back_kb, parse_mode="Markdown")
-    await callback.answer()
+    elif action.startswith("del_"):
+        s_name = action.replace("del_", "")
+        db.delete_session_db(s_name)
+        clients.pop(s_name, None)
+        await q.edit_message_text("✅ Hesap silindi.", reply_markup=get_keyboard(uid))
 
-@router.callback_query(F.data == "main_menu")
-async def back_to_main(callback: types.CallbackQuery):
-    await cmd_start(callback.message)
-    await callback.answer()
+    elif action == "blacklist":
+        context.user_data["flow"] = "blacklist"
+        await q.edit_message_text("🚫 Genel engellenecek grup linkini veya kullanıcı adını gönderin:", reply_markup=sub_menu_keyboard())
 
-# Router kayıt
-dp = Dispatcher(storage=MemoryStorage())
-dp.include_router(router)
+    elif action == "redeem":
+        context.user_data["flow"] = "redeem"
+        await q.edit_message_text("🔑 KEY kodunu girin:", reply_markup=sub_menu_keyboard())
+
+    elif action == "admin" and is_admin(uid):
+        await q.edit_message_text("👑 **YÖNETİCİ LİSANS İPTAL & YÖNETİM PANELİ**", reply_markup=admin_keyboard())
+
+    elif action == "key_create" and is_admin(uid):
+        context.user_data["flow"] = "key_days"
+        await q.edit_message_text("Kaç günlük KEY üretilsin?", reply_markup=admin_keyboard())
+
+    elif action == "key_list" and is_admin(uid):
+        rows = db.list_licenses()
+        kb_list = []
+        for r in rows:
+            code = r['code']
+            status_icon = "🟢 Aktif" if not r['is_used'] else "🔴 Kullanıldı"
+            kb_list.append([
+                InlineKeyboardButton(f"{code} ({r['duration_days']}g) - {status_icon}", callback_data="ignore"),
+                InlineKeyboardButton("🗑 İptal Et/Sil", callback_data=f"rev_key_{code}")
+            ])
+        kb_list.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+        await q.edit_message_text("📋 **KEY LİSTESİ VE İPTAL YÖNETİMİ**", reply_markup=InlineKeyboardMarkup(kb_list))
+
+    elif action.startswith("rev_key_") and is_admin(uid):
+        k_code = action.replace("rev_key_", "")
+        db.revoke_license(k_code)
+        await q.answer(f"🔑 Key iptal edildi: {k_code}", show_alert=True)
+        await admin_panel_refresh(q)
+
+    elif action == "admin_broadcast" and is_admin(uid):
+        context.user_data["flow"] = "admin_broadcast_msg"
+        await q.edit_message_text("📢 Tüm kullanıcılara gönderilecek duyuru mesajını yazın:", reply_markup=admin_keyboard())
+
+    elif action.startswith("approve_pay_") and is_admin(uid):
+        target_uid = int(action.replace("approve_pay_", ""))
+        db.add_license_time_db(target_uid, 30)
+        await q.edit_message_text(f"✅ Ödeme onaylandı, kullanıcıya süre eklendi.")
+        try:
+            await context.bot.send_message(chat_id=target_uid, text="🎉 Ödemeniz onaylandı! Süreniz hesabınıza tanımlandı.")
+        except: pass
+
+    elif action.startswith("reject_pay_") and is_admin(uid):
+        target_uid = int(action.replace("reject_pay_", ""))
+        await q.edit_message_text(f"❌ Ödeme reddedildi.")
+        try:
+            await context.bot.send_message(chat_id=target_uid, text="❌ Ödemeniz onaylanmadı.")
+        except: pass
+
+async def admin_panel_refresh(q):
+    rows = db.list_licenses()
+    kb_list = []
+    for r in rows:
+        code = r['code']
+        status_icon = "🟢 Aktif" if not r['is_used'] else "🔴 Kullanıldı"
+        kb_list.append([
+            InlineKeyboardButton(f"{code} ({r['duration_days']}g) - {status_icon}", callback_data="ignore"),
+            InlineKeyboardButton("🗑 İptal Et/Sil", callback_data=f"rev_key_{code}")
+        ])
+    kb_list.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+    await q.edit_message_text("📋 **KEY LİSTESİ VE İPTAL YÖNETİMİ**", reply_markup=InlineKeyboardMarkup(kb_list))
+
+# --- METİN VE FOTOĞRAF İŞLEYİCİSİ ---
+async def text_handler(update, context):
+    uid = update.effective_user.id
+    text = update.effective_message.text.strip() if update.effective_message.text else ""
+    flow = context.user_data.get("flow")
+    
+    if update.effective_message.photo and flow == "awaiting_receipt":
+        photo = update.effective_message.photo[-1]
+        days = context.user_data.get("pending_buy_days", 30)
+        p_name = context.user_data.get("pending_buy_name", "Paket")
+        
+        context.user_data.clear()
+        await update.effective_message.reply_text("✅ Dekont yöneticiye iletildi, onay bekleniyor.", reply_markup=get_keyboard(uid))
+        
+        kb_admin = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Onayla", callback_data=f"approve_pay_{uid}"), InlineKeyboardButton("❌ Reddet", callback_data=f"reject_pay_{uid}")]
+        ])
+        try:
+            await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo.file_id, caption=f"🚨 **ÖDEME ONAY TALEBİ**\nKullanıcı: `{uid}`\nPaket: {p_name} ({days} Gün)", reply_markup=kb_admin)
+        except: pass
+        return
+
+    if not flow: return
+
+    if flow.startswith("acc_text_input_"):
+        s_name = flow.replace("acc_text_input_", "")
+        db.set_account_custom_text(s_name, text)
+        context.user_data.clear()
+        await update.effective_message.reply_text("✅ Bu hesap için özel reklam metni kaydedildi!", reply_markup=get_keyboard(uid))
+        return
+
+    if flow.startswith("acc_times_input_"):
+        s_name = flow.replace("acc_times_input_", "")
+        try:
+            val = int(text)
+            db.set_account_delay(s_name, val)
+            context.user_data.clear()
+            await update.effective_message.reply_text(f"✅ Bu hesabın grup arası bekleme süresi {val} saniye olarak ayarlandı.", reply_markup=get_keyboard(uid))
+        except ValueError:
+            await update.effective_message.reply_text("Lütfen geçerli bir sayı girin.")
+        return
+
+    if flow == "admin_broadcast_msg" and is_admin(uid):
+        for u_id in db.get_all_users():
+            try: await context.bot.send_message(chat_id=u_id, text=f"📢 **DUYURU**\n\n{text}", parse_mode="Markdown")
+            except: pass
+        context.user_data.clear()
+        await update.effective_message.reply_text("✅ Duyuru iletildi.", reply_markup=admin_keyboard())
+        return
+
+    if flow == "phone":
+        if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
+            await update.effective_message.reply_text("Geçerli numara girin (+90...)")
+            return
+        session_name = f"SESSION_{uid}_{text}"
+        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=2, auto_reconnect=True)
+        await client.connect()
+        try:
+            sent = await client.send_code_request(text)
+            pending[uid] = {"client": client, "phone": text, "hash": sent.phone_code_hash, "session_name": session_name}
+            context.user_data["flow"] = "code"
+            await update.effective_message.reply_text("📲 Telegram kodunu girin:")
+        except Exception as e:
+            await client.disconnect()
+            await update.effective_message.reply_text(f"Hata: {e}")
+
+    elif flow == "code":
+        item = pending.get(uid)
+        if not item: return
+        try:
+            await item["client"].sign_in(phone=item["phone"], code=text, phone_code_hash=item["hash"])
+            s_name = item["session_name"]
+            s_string = item["client"].session.save()
+            me_user = await item["client"].get_me()
+            username = me_user.username if me_user and me_user.username else ""
+            clients[s_name] = item["client"]
+            db.save_session_db(uid, s_name, item["phone"], s_string, username=username)
+            pending.pop(uid, None)
+            context.user_data.clear()
+            await update.effective_message.reply_text("✅ Hesap başarıyla bağlandı ve kullanıcı adı kaydedildi!", reply_markup=get_keyboard(uid))
+        except SessionPasswordNeededError:
+            context.user_data["flow"] = "2fa"
+            await update.effective_message.reply_text("🔒 2FA şifrenizi girin:")
+        except Exception as e:
+            await update.effective_message.reply_text(f"Hata: {e}")
+
+    elif flow == "2fa":
+        item = pending.get(uid)
+        if not item: return
+        try:
+            await item["client"].sign_in(password=text)
+            s_name = item["session_name"]
+            s_string = item["client"].session.save()
+            me_user = await item["client"].get_me()
+            username = me_user.username if me_user and me_user.username else ""
+            clients[s_name] = item["client"]
+            db.save_session_db(uid, s_name, item["phone"], s_string, username=username)
+            pending.pop(uid, None)
+            context.user_data.clear()
+            await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
+        except Exception as e:
+            await update.effective_message.reply_text(f"Hata: {e}")
+
+    elif flow.startswith("acc_blacklist_add_"):
+        s_name = flow.replace("acc_blacklist_add_", "")
+        target = text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
+        db.add_account_blacklist_db(s_name, target)
+        context.user_data.clear()
+        await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
+
+    elif flow == "blacklist":
+        target = "@" + text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
+        if uid not in blacklisted_groups: blacklisted_groups[uid] = set()
+        blacklisted_groups[uid].add(target)
+        context.user_data.clear()
+        await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
+
+    elif flow == "redeem":
+        ok, msg = db.use_license(uid, text)
+        context.user_data.clear()
+        await update.effective_message.reply_text(msg, reply_markup=get_keyboard(uid))
+
+    elif flow == "key_days" and is_admin(uid):
+        try:
+            days = int(text)
+            code = "FKD-" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
+            db.create_license(code, days)
+            context.user_data.clear()
+            await update.effective_message.reply_text(f"✅ KEY: `{code}` ({days} Gün)", parse_mode="Markdown", reply_markup=admin_keyboard())
+        except ValueError:
+            await update.effective_message.reply_text("Gün sayısı girin.")
+
+def main():
+    db.init_db()
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, text_handler))
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
