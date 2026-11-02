@@ -1,4 +1,5 @@
 import sqlite3
+import datetime
 
 DB_NAME = "database.sqlite"
 
@@ -18,18 +19,28 @@ def init_db():
                     is_running INTEGER DEFAULT 0,
                     custom_ad_text TEXT DEFAULT ''
                 )''')
+    
+    # Hesaplar tablosuna: kullanıcı adı, hesaba özel metin ve hesaba özel süre sütunları eklendi
     c.execute('''CREATE TABLE IF NOT EXISTS sessions (
                     session_name TEXT PRIMARY KEY,
                     uid INTEGER,
                     phone TEXT,
-                    session_string TEXT
+                    session_string TEXT,
+                    username TEXT DEFAULT '',
+                    custom_text TEXT DEFAULT '',
+                    delay_seconds INTEGER DEFAULT 3,
+                    loop_seconds INTEGER DEFAULT 240
                 )''')
+    
+    # Lisanslar tablosuna: key iptali için 'status' sütunu eklendi
     c.execute('''CREATE TABLE IF NOT EXISTS licenses (
                     code TEXT PRIMARY KEY,
                     duration_days INTEGER,
                     is_used INTEGER DEFAULT 0,
-                    used_by INTEGER DEFAULT 0
+                    used_by INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active'
                 )''')
+                
     c.execute('''CREATE TABLE IF NOT EXISTS user_licenses (
                     uid INTEGER PRIMARY KEY,
                     expires_at TIMESTAMP
@@ -67,11 +78,11 @@ def set_user(uid, **kwargs):
     conn.commit()
     conn.close()
 
-def save_session_db(uid, session_name, phone, session_string):
+def save_session_db(uid, session_name, phone, session_string, username=""):
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO sessions (session_name, uid, phone, session_string) VALUES (?, ?, ?, ?)", 
-              (session_name, uid, phone, session_string))
+    c.execute("INSERT OR REPLACE INTO sessions (session_name, uid, phone, session_string, username) VALUES (?, ?, ?, ?, ?)", 
+              (session_name, uid, phone, session_string, username))
     conn.commit()
     conn.close()
 
@@ -83,6 +94,14 @@ def get_user_sessions_db(uid):
     conn.close()
     return [(row["session_name"], row["phone"], row["session_string"]) for row in rows]
 
+def get_account_username(session_name):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT username FROM sessions WHERE session_name = ?", (session_name,))
+    row = c.fetchone()
+    conn.close()
+    return row["username"] if row and row["username"] else ""
+
 def delete_session_db(session_name):
     conn = get_db()
     c = conn.cursor()
@@ -90,6 +109,45 @@ def delete_session_db(session_name):
     c.execute("DELETE FROM account_blacklist WHERE session_name = ?", (session_name,))
     conn.commit()
     conn.close()
+
+# --- HESABA ÖZEL METİN VE SÜRE FONKSİYONLARI ---
+def set_account_custom_text(session_name, text):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET custom_text = ? WHERE session_name = ?", (text, session_name))
+    conn.commit()
+    conn.close()
+
+def get_account_custom_text(session_name):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT custom_text FROM sessions WHERE session_name = ?", (session_name,))
+    row = c.fetchone()
+    conn.close()
+    return row["custom_text"] if row and row["custom_text"] else ""
+
+def set_account_delay(session_name, delay):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET delay_seconds = ? WHERE session_name = ?", (delay, session_name))
+    conn.commit()
+    conn.close()
+
+def get_account_delay(session_name):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT delay_seconds FROM sessions WHERE session_name = ?", (session_name,))
+    row = c.fetchone()
+    conn.close()
+    return row["delay_seconds"] if row and row["delay_seconds"] is not None else 3
+
+def get_account_loop(session_name):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT loop_seconds FROM sessions WHERE session_name = ?", (session_name,))
+    row = c.fetchone()
+    conn.close()
+    return row["loop_seconds"] if row and row["loop_seconds"] is not None else 240
 
 def add_account_blacklist_db(session_name, group_id):
     conn = get_db()
@@ -109,20 +167,26 @@ def get_account_blacklist_db(session_name):
 def create_license(code, days):
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO licenses (code, duration_days) VALUES (?, ?)", (code, days))
+    c.execute("INSERT OR REPLACE INTO licenses (code, duration_days, status) VALUES (?, ?, 'active')", (code, days))
     conn.commit()
     conn.close()
 
 def list_licenses():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT code, duration_days, is_used, used_by FROM licenses")
+    c.execute("SELECT code, duration_days, is_used, used_by, status FROM licenses WHERE status != 'revoked'")
     rows = c.fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
+def revoke_license(code):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE licenses SET status = 'revoked' WHERE code = ?", (code,))
+    conn.commit()
+    conn.close()
+
 def add_license_time_db(uid, days):
-    import datetime
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT expires_at FROM user_licenses WHERE uid = ?", (uid,))
@@ -148,14 +212,14 @@ def add_license_time_db(uid, days):
 def use_license(uid, code):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT duration_days, is_used FROM licenses WHERE code = ?", (code,))
+    c.execute("SELECT duration_days, is_used, status FROM licenses WHERE code = ?", (code,))
     row = c.fetchone()
     if not row:
         conn.close()
         return False, "❌ Böyle bir KEY bulunamadı!"
-    if row["is_used"]:
+    if row["is_used"] or row["status"] == 'revoked':
         conn.close()
-        return False, "⚠️ Bu KEY daha önce kullanılmış!"
+        return False, "⚠️ Bu KEY daha önce kullanılmış veya iptal edilmiş!"
     
     days = row["duration_days"]
     c.execute("UPDATE licenses SET is_used = 1, used_by = ? WHERE code = ?", (uid, code))
@@ -168,7 +232,6 @@ def use_license(uid, code):
 def license_valid(uid, admin_id):
     if int(uid) == int(admin_id):
         return True
-    import datetime
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT expires_at FROM user_licenses WHERE uid = ?", (uid,))
