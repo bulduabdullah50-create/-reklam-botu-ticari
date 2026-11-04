@@ -20,7 +20,7 @@ def init_db():
                     custom_ad_text TEXT DEFAULT ''
                 )''')
     
-    # Hesaplar tablosuna: kullanıcı adı, hesaba özel metin ve hesaba özel süre sütunları eklendi
+    # Hesaplar tablosu: kullanıcı adı, hesaba özel metin ve hesaba özel süre sütunları
     c.execute('''CREATE TABLE IF NOT EXISTS sessions (
                     session_name TEXT PRIMARY KEY,
                     uid INTEGER,
@@ -32,13 +32,14 @@ def init_db():
                     loop_seconds INTEGER DEFAULT 240
                 )''')
     
-    # Lisanslar tablosuna: key iptali için 'status' sütunu eklendi
+    # Lisanslar tablosu: İsimli key takibi için 'note' ve iptal için 'status' sütunları eklendi
     c.execute('''CREATE TABLE IF NOT EXISTS licenses (
                     code TEXT PRIMARY KEY,
                     duration_days INTEGER,
                     is_used INTEGER DEFAULT 0,
                     used_by INTEGER DEFAULT 0,
-                    status TEXT DEFAULT 'active'
+                    status TEXT DEFAULT 'active',
+                    note TEXT DEFAULT 'İsimsiz'
                 )''')
                 
     c.execute('''CREATE TABLE IF NOT EXISTS user_licenses (
@@ -141,6 +142,13 @@ def get_account_delay(session_name):
     conn.close()
     return row["delay_seconds"] if row and row["delay_seconds"] is not None else 3
 
+def set_account_loop(session_name, loop_seconds):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET loop_seconds = ? WHERE session_name = ?", (loop_seconds, session_name))
+    conn.commit()
+    conn.close()
+
 def get_account_loop(session_name):
     conn = get_db()
     c = conn.cursor()
@@ -164,17 +172,18 @@ def get_account_blacklist_db(session_name):
     conn.close()
     return [r["group_id"] for r in rows]
 
-def create_license(code, days):
+# --- LİSANS VE İSİMLİ KEY FONKSİYONLARI ---
+def create_license(code, days, note="İsimsiz"):
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO licenses (code, duration_days, status) VALUES (?, ?, 'active')", (code, days))
+    c.execute("INSERT OR REPLACE INTO licenses (code, duration_days, status, note) VALUES (?, ?, 'active', ?)", (code, days, note))
     conn.commit()
     conn.close()
 
 def list_licenses():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT code, duration_days, is_used, used_by, status FROM licenses WHERE status != 'revoked'")
+    c.execute("SELECT code, duration_days, is_used, used_by, status, note FROM licenses WHERE status != 'revoked'")
     rows = c.fetchall()
     conn.close()
     return [dict(r) for r in rows]
