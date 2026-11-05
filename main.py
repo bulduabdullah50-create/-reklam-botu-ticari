@@ -62,7 +62,6 @@ async def show_home(update, context):
     uid = update.effective_user.id
     db.ensure_user(uid, update.effective_user.username)
     
-    # 1. MADDE: Lisans durumunu anlık ve doğru şekilde gösteren dinamik yapı
     expiry = db.get_user_expiry(uid)
     expiry_str = "Süre Bulunmuyor ❌"
     if expiry:
@@ -99,9 +98,6 @@ async def start(update, context):
     context.user_data.clear()
     await show_home(update, context)
 
-# -----------------------------------------------------------------------------
-# KURULUM & ÖDEME REHBERİ
-# -----------------------------------------------------------------------------
 async def show_guide(update, context):
     q = update.callback_query
     guide_text = (
@@ -112,15 +108,14 @@ async def show_guide(update, context):
         "• Ödemeniz onaylandığı anda size özel **İsimli Lisans Keyi** anında tanımlanır.\n\n"
         "> **2️⃣ Bot Nasıl Kurulur ve Aktif Edilir?**\n"
         "• **Adım 1:** Lisans keyinizi ilgili alana girerek aktive edin.\n"
-        "• **Adım 2:** \"Hesaplarım\" menüsünden Telegram hesaplarınızı bağlayın. (Hesabınızın üstünde kullanıcı adınız net olarak görünür).\n"
-        "• **Adım 3:** Her hesaba özel **reklam metninizi** ister Kayıtlı Mesajlar'dan ister panelden ayrı ayrı ayarlayın.\n"
-        "• **Adım 4:** Grup arası bekleme sürelerini ve tur dinlenme aralıklarını her numara için ayrı yapılandırın.\n"
-        "• **Adım 5:** Ana paneldeki **Başlat/Durdur** butonlarıyla reklam akışını yönetin!\n\n"
-        "⚠️ **Güvenlik:** Akıllı risk koruması ile spam anında süreler otomatik güvenliye alınır."
+        "• **Adım 2:** \"Hesaplarım\" menüsünden Telegram hesaplarınızı bağlayın.\n"
+        "• **Adım 3:** Her hesaba özel **reklam metninizi** ister Kayıtlı Mesajlar'dan ister panelden ayarlayın.\n"
+        "• **Adım 4:** Grup arası bekleme sürelerini ve tur dinlenme aralıklarını yapılandırın.\n"
+        "• **Adım 5:** Ana paneldeki **Başlat/Durdur** butonlarıyla reklam akışını yönetin!"
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- REKLAM GÖNDERİM MOTORU (TÜM SÜRELER VE ÖZEL METİNLER DAHİL) ---
+# --- REKLAM GÖNDERİM MOTORU (KESİNTİSİZ OTOMATİK DÖNGÜ) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
     if not has_valid_access(uid):
         return
@@ -171,7 +166,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 except Exception:
                     continue
 
-                # 5. MADDE: Hesaba özel metin ayarlanmışsa onu kullan, yoksa Kayıtlı Mesajlardan (Saved Messages) çek
                 custom_text = db.get_account_custom_text(s_name)
                 ad_text = ""
                 if custom_text:
@@ -206,7 +200,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 success_count, fail_count, skipped_count = 0, 0, 0
                 failed_group_list = []
 
-                # 2. ve 4. MADDE: Hesaba özel grup arası bekleme ve tur sonu dinlenme süreleri
                 group_interval = db.get_account_delay(s_name)
                 loop_interval = db.get_account_loop(s_name)
 
@@ -224,11 +217,11 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         await client.send_message(group.id, ad_text, parse_mode='md')
                         success_count += 1
                     except FloodWaitError as exc:
-                        log.warning(f"Spam riski algılandı! FloodWait: {exc.seconds} saniye. Süreler otomatik artırılıyor.")
+                        log.warning(f"Spam riski algılandı! FloodWait: {exc.seconds} saniye.")
                         try:
                             await context.bot.send_message(
                                 chat_id=chat_id, 
-                                text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** Hesap spam sınırına yaklaştı. Süreler otomatik artırılarak hesap korumaya alındı."
+                                text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** Hesap spam sınırına yaklaştı."
                             )
                         except: pass
                         
@@ -260,14 +253,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 try: await client.disconnect()
                 except: pass
 
-                if target_s_name:
-                    break
-
-                # 2. MADDE: Tur sonu dinlenme süresi (Loop Interval) aktif olarak çalışıyor
                 await asyncio.sleep(loop_interval)
-
-            if target_s_name:
-                break
 
         except asyncio.CancelledError:
             break
@@ -313,10 +299,8 @@ async def button(update, context):
 
     if action == "home": 
         await show_home(update, context)
-    
     elif action == "guide_menu":
         await show_guide(update, context)
-
     elif action == "pricing_panel":
         text = (
             "💎 **ABONELİK VE FİYAT LİSTESİ**\n"
@@ -334,7 +318,6 @@ async def button(update, context):
             [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]
         ])
         await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
-
     elif action in ["buy_daily", "buy_weekly", "buy_monthly"]:
         p_name, p_price, days = ("Günlük Paket", "200 TL", 1) if action == "buy_daily" else (("Haftalık Paket", "400 TL", 7) if action == "buy_weekly" else ("Aylık Paket", "1000 TL", 30))
         context.user_data["pending_buy_days"] = days
@@ -345,26 +328,22 @@ async def button(update, context):
             f"📦 Paket: **{p_name}** | Tutar: **{p_price}**\n\n"
             f"🏦 **İBAN:** `TR100006200091000006969709`\n"
             f"• **Alıcı:** Garanti Ödeme ve Elektronik Para Hizmetleri A.Ş.\n"
-            f"• **Açıklama:** `TAMİ7696919784875077`\n\n"
-            f"⚠️ Açıklamaya kodu yazıp ödemeyi yaptıktan sonra dekont gönderin."
+            f"• **Açıklama:** `TAMİ7696919784875077`"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📤 Dekont Gönder", callback_data="send_receipt_prompt")],
             [InlineKeyboardButton("⬅ Geri", callback_data="pricing_panel")]
         ])
         await q.edit_message_text(pay_text, parse_mode="Markdown", reply_markup=kb)
-
     elif action == "send_receipt_prompt":
         context.user_data["flow"] = "awaiting_receipt"
         await q.edit_message_text("📤 Lütfen yaptığınız ödemenin **dekont fotoğrafını** bota doğrudan gönderin:", reply_markup=sub_menu_keyboard())
-
     elif action == "add":
         if not has_valid_access(uid):
             await q.edit_message_text("❌ Aktif lisansınız yok.", reply_markup=sub_menu_keyboard())
             return
         context.user_data["flow"] = "phone"
         await q.edit_message_text("➕ Telefon numaranızı +ülke kodu ile gönderin (`+90...`):", parse_mode="Markdown", reply_markup=sub_menu_keyboard())
-
     elif action == "accounts":
         db_sessions = db.get_user_sessions_db(uid)
         if not db_sessions:
@@ -377,19 +356,17 @@ async def button(update, context):
             rows.append([InlineKeyboardButton(f"📱 {display_str}", callback_data=f"manage_{s_name}")])
         rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
         await q.edit_message_text("👤 **HESAPLARIM VE KULLANICI ADLARI**", reply_markup=InlineKeyboardMarkup(rows))
-
     elif action.startswith("manage_"):
         s_name = action.replace("manage_", "")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶ Başlat", callback_data=f"start_one_{s_name}"), InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_one_{s_name}")],
-            [InlineKeyboardButton("✍️ Bu Hesaba Özel Metin Gir (Ya da Sıfırla)", callback_data=f"set_acc_text_{s_name}")],
-            [InlineKeyboardButton("⏱ Süreleri Ayarla (Grup & Tur Dinlenme)", callback_data=f"set_acc_times_{s_name}")],
+            [InlineKeyboardButton("✍️ Bu Hesaba Özel Metin Gir", callback_data=f"set_acc_text_{s_name}")],
+            [InlineKeyboardButton("⏱ Süreleri Ayarla", callback_data=f"set_acc_times_{s_name}")],
             [InlineKeyboardButton("🚫 Gruba Özel Engel", callback_data=f"acc_bl_{s_name}")],
             [InlineKeyboardButton("❌ Hesabı Sil", callback_data=f"del_{s_name}")],
             [InlineKeyboardButton("⬅ Geri", callback_data="accounts")]
         ])
         await q.edit_message_text("📱 **Hesap Yönetim Paneli**", reply_markup=kb)
-
     elif action == "account_config_menu":
         db_sessions = db.get_user_sessions_db(uid)
         if not db_sessions:
@@ -402,31 +379,25 @@ async def button(update, context):
             rows.append([InlineKeyboardButton(f"⚙️ Ayarla: {disp}", callback_data=f"manage_{s_name}")])
         rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
         await q.edit_message_text("📩 **HESABA ÖZEL METİN VE SÜRE YAPILANDIRMASI**\n\nİşlem yapmak istediğiniz hesabı seçin:", reply_markup=InlineKeyboardMarkup(rows))
-
     elif action.startswith("start_one_"):
         s_name = action.replace("start_one_", "")
         await start_sender(uid, q.message.chat_id, context, target_s_name=s_name)
-        await q.message.reply_text("▶ **Seçilen hesap için reklam başlatıldı!**")
-
+        await q.message.reply_text("▶ **Seçilen hesap için reklam başlatıldı! (Sürekli otomatik döngüde çalışacak)**")
     elif action.startswith("stop_one_"):
         s_name = action.replace("stop_one_", "")
         await stop_sender(uid, q.message.chat_id, context, target_s_name=s_name)
-
-    # 4. ve 5. MADDE: Hesaba özel metin ve süre menü tetikleyicileri
     elif action.startswith("set_acc_text_"):
         s_name = action.replace("set_acc_text_", "")
         context.user_data["flow"] = f"acc_text_input_{s_name}"
         await q.edit_message_text(
             "✍️ Bu hesabın göndereceği **özel reklam metnini** yazın.\n\n"
-            "💡 _Not: Eğer bu hesaba özel metin girmek yerine **Kayıtlı Mesajlar (Saved Messages)** kullanılmasını istiyorsanız doğrudan `sil` yazıp gönderin._", 
+            "💡 _Not: Kayıtlı Mesajlar kullanmak istiyorsanız `sil` yazın._", 
             reply_markup=sub_menu_keyboard()
         )
-
     elif action.startswith("set_acc_times_"):
         s_name = action.replace("set_acc_times_", "")
         context.user_data["flow"] = f"acc_times_delay_{s_name}"
         await q.edit_message_text("⏱ Bu hesap için **grup arası bekleme süresini (saniye)** yazın (Örn: `3`):", reply_markup=sub_menu_keyboard())
-
     elif action == "start_stop_menu":
         db_sessions = db.get_user_sessions_db(uid)
         if not db_sessions:
@@ -442,7 +413,6 @@ async def button(update, context):
             ])
         rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
         await q.edit_message_text("▶️ **ANA PANELDEN BAŞLAT / DURDUR KONTROLÜ**", reply_markup=InlineKeyboardMarkup(rows))
-
     elif action == "failed_reports":
         db_sessions = db.get_user_sessions_db(uid)
         report_lines = ["📊 **BAŞARISIZ GÖNDERİM RAPORLARI**\n"]
@@ -451,42 +421,31 @@ async def button(update, context):
             report_lines.append(f"📱 `{phone}` -> Başarısız Grup Sayısı: {len(fails)}")
             if fails:
                 report_lines.append(f"  • Hata Alınanlar: {', '.join(fails[:5])}")
-        
         await q.edit_message_text("\n".join(report_lines), parse_mode="Markdown", reply_markup=sub_menu_keyboard())
-
     elif action.startswith("acc_bl_"):
         s_name = action.replace("acc_bl_", "")
         context.user_data["flow"] = f"acc_blacklist_add_{s_name}"
         await q.edit_message_text("🚫 Bu hesabın mesaj atmayacağı grubun linkini veya kullanıcı adını gönderin:", reply_markup=sub_menu_keyboard())
-
     elif action.startswith("del_"):
         s_name = action.replace("del_", "")
         db.delete_session_db(s_name)
         clients.pop(s_name, None)
         await q.edit_message_text("✅ Hesap silindi.", reply_markup=get_keyboard(uid))
-
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
         await q.edit_message_text("🚫 Genel engellenecek grup linkini veya kullanıcı adını gönderin:", reply_markup=sub_menu_keyboard())
-
     elif action == "redeem":
         context.user_data["flow"] = "redeem"
         await q.edit_message_text("🔑 KEY kodunu girin:", reply_markup=sub_menu_keyboard())
-
     elif action == "admin" and is_admin(uid):
         await q.edit_message_text("👑 **YÖNETİCİ LİSANS & İSİMLİ KEY ÜRETİM PANELİ**", reply_markup=admin_keyboard())
-
-    # 3. MADDE: Yöneticiye özel isimli key üretme tetikleyicisi
     elif action == "key_create" and is_admin(uid):
         context.user_data["flow"] = "key_note_and_days"
         await q.edit_message_text(
-            "➕ **İsimli KEY Üretimi**\n\n"
-            "Kime vereceğini ve kaç günlük olduğunu şu formatta yaz:\n"
-            "`İsim,GünSayısı` (Örn: `Ahmet Bey,30` veya `Mehmet,7`)",
+            "➕ **İsimli KEY Üretimi**\n\nFormat: `İsim,GünSayısı` (Örn: `Ahmet Bey,30`)",
             parse_mode="Markdown",
             reply_markup=admin_keyboard()
         )
-
     elif action == "key_list" and is_admin(uid):
         rows = db.list_licenses()
         kb_list = []
@@ -500,25 +459,21 @@ async def button(update, context):
             ])
         kb_list.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
         await q.edit_message_text("📋 **KEY LİSTESİ VE SAHİPLERİ**", reply_markup=InlineKeyboardMarkup(kb_list))
-
     elif action.startswith("rev_key_") and is_admin(uid):
         k_code = action.replace("rev_key_", "")
         db.revoke_license(k_code)
         await q.answer(f"🔑 Key iptal edildi: {k_code}", show_alert=True)
         await admin_panel_refresh(q)
-
     elif action == "admin_broadcast" and is_admin(uid):
         context.user_data["flow"] = "admin_broadcast_msg"
-        await q.edit_message_text("📢 Tüm kullanıcılara gönderilecek duyuru mesajını yazın:", reply_markup=admin_keyboard())
-
+        await q.edit_message_text("📢 Tüm kullanıcılara duyuru mesajını yazın:", reply_markup=admin_keyboard())
     elif action.startswith("approve_pay_") and is_admin(uid):
         target_uid = int(action.replace("approve_pay_", ""))
         db.add_license_time_db(target_uid, 30)
-        await q.edit_message_text(f"✅ Ödeme onaylandı, kullanıcıya süre eklendi.")
+        await q.edit_message_text(f"✅ Ödeme onaylandı.")
         try:
-            await context.bot.send_message(chat_id=target_uid, text="🎉 Ödemeniz onaylandı! Süreniz hesabınıza tanımlandı.")
+            await context.bot.send_message(chat_id=target_uid, text="🎉 Ödemeniz onaylandı!")
         except: pass
-
     elif action.startswith("reject_pay_") and is_admin(uid):
         target_uid = int(action.replace("reject_pay_", ""))
         await q.edit_message_text(f"❌ Ödeme reddedildi.")
@@ -540,7 +495,6 @@ async def admin_panel_refresh(q):
     kb_list.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
     await q.edit_message_text("📋 **KEY LİSTESİ VE SAHİPLERİ**", reply_markup=InlineKeyboardMarkup(kb_list))
 
-# --- METİN VE FOTOĞRAF İŞLEYİCİSİ (TÜM GİRİŞ AKIŞLARI) ---
 async def text_handler(update, context):
     uid = update.effective_user.id
     text = update.effective_message.text.strip() if update.effective_message.text else ""
@@ -550,83 +504,65 @@ async def text_handler(update, context):
         photo = update.effective_message.photo[-1]
         days = context.user_data.get("pending_buy_days", 30)
         p_name = context.user_data.get("pending_buy_name", "Paket")
-        
         context.user_data.clear()
-        await update.effective_message.reply_text("✅ Dekont yöneticiye iletildi, onay bekleniyor.", reply_markup=get_keyboard(uid))
-        
+        await update.effective_message.reply_text("✅ Dekont yöneticiye iletildi.", reply_markup=get_keyboard(uid))
         kb_admin = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Onayla", callback_data=f"approve_pay_{uid}"), InlineKeyboardButton("❌ Reddet", callback_data=f"reject_pay_{uid}")]
         ])
         try:
-            await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo.file_id, caption=f"🚨 **ÖDEME ONAY TALEBİ**\nKullanıcı: `{uid}`\nPaket: {p_name} ({days} Gün)", reply_markup=kb_admin)
+            await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo.file_id, caption=f"🚨 **ÖDEME TALEBİ**\nKullanıcı: `{uid}`", reply_markup=kb_admin)
         except: pass
         return
 
     if not flow: return
 
-    # 4. ve 5. MADDE: Hesaba özel metin kaydetme veya sıfırlama (Kayıtlı mesajlara dönme)
     if flow.startswith("acc_text_input_"):
         s_name = flow.replace("acc_text_input_", "")
         if text.lower() == "sil":
             db.set_account_custom_text(s_name, "")
-            await update.effective_message.reply_text("✅ Özel metin kaldırıldı. Artık bu hesap **Kayıtlı Mesajlar (Saved Messages)** üzerindeki metni kullanacak.", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text("✅ Özel metin kaldırıldı (Kayıtlı Mesajlara dönüldü).", reply_markup=get_keyboard(uid))
         else:
             db.set_account_custom_text(s_name, text)
-            await update.effective_message.reply_text("✅ Bu hesap için özel reklam metni başarıyla kaydedildi!", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text("✅ Özel reklam metni kaydedildi!", reply_markup=get_keyboard(uid))
         context.user_data.clear()
         return
 
-    # 2. ve 4. MADDE: Hesaba özel grup arası bekleme süresi girdisi -> Sonra tur dinlenme süresini iste
     if flow.startswith("acc_times_delay_"):
         s_name = flow.replace("acc_times_delay_", "")
         try:
             val = int(text)
             db.set_account_delay(s_name, val)
             context.user_data["flow"] = f"acc_times_loop_{s_name}"
-            await update.effective_message.reply_text(
-                f"✅ Grup arası bekleme {val} saniye yapıldı.\n\n"
-                "⏱ Şimdi bu hesap için **Tur Dinlenme Süresini (saniye)** girin (Örn: `240`):", 
-                reply_markup=sub_menu_keyboard()
-            )
+            await update.effective_message.reply_text(f"⏱ Şimdi bu hesap için **Tur Dinlenme Süresini (saniye)** yazın (Örn: `240`):", reply_markup=sub_menu_keyboard())
         except ValueError:
-            await update.effective_message.reply_text("Lütfen geçerli bir sayı girin (Örn: 3).")
+            await update.effective_message.reply_text("Lütfen geçerli bir sayı girin.")
         return
 
-    # 2. ve 4. MADDE: Hesaba özel tur dinlenme süresi girdisi ve kaydı
     if flow.startswith("acc_times_loop_"):
         s_name = flow.replace("acc_times_loop_", "")
         try:
             val = int(text)
             db.set_account_loop(s_name, val)
             context.user_data.clear()
-            await update.effective_message.reply_text(f"✅ Bu hesabın tur dinlenme süresi {val} saniye olarak başarıyla ayarlandı!", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text(f"✅ Tur dinlenme süresi {val} saniye olarak ayarlandı!", reply_markup=get_keyboard(uid))
         except ValueError:
-            await update.effective_message.reply_text("Lütfen geçerli bir sayı girin (Örn: 240).")
+            await update.effective_message.reply_text("Lütfen geçerli bir sayı girin.")
         return
 
-    # 3. MADDE: Yönetici için İsimli KEY Üretim İşlemi
     if flow == "key_note_and_days" and is_admin(uid):
         try:
             parts = text.split(",")
             if len(parts) < 2:
-                await update.effective_message.reply_text("❌ Hatalı format! `İsim,GünSayısı` şeklinde yazmalısın. Örn: `Ahmet Bey,30`")
+                await update.effective_message.reply_text("❌ Hatalı format! `İsim,GünSayısı` şeklinde yazın.")
                 return
             note = parts[0].strip()
             days = int(parts[1].strip())
-            
             code = "FKD-" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
             db.create_license(code, days, note=note)
             context.user_data.clear()
-            await update.effective_message.reply_text(
-                f"✅ **KEY Başarıyla Üretildi!**\n\n"
-                f"👤 **Kime Verildi / Not:** {note}\n"
-                f"🔑 **KEY Kodu:** `{code}`\n"
-                f"⏳ **Süre:** {days} Gün",
-                parse_mode="Markdown",
-                reply_markup=admin_keyboard()
-            )
+            await update.effective_message.reply_text(f"✅ **KEY Üretildi:** `{code}` ({note} - {days} Gün)", parse_mode="Markdown", reply_markup=admin_keyboard())
         except ValueError:
-            await update.effective_message.reply_text("❌ Gün sayısı sayı olmalıdır. Örn: `Ahmet,30`")
+            await update.effective_message.reply_text("❌ Gün sayısı sayı olmalıdır.")
         return
 
     if flow == "admin_broadcast_msg" and is_admin(uid):
@@ -666,7 +602,7 @@ async def text_handler(update, context):
             db.save_session_db(uid, s_name, item["phone"], s_string, username=username)
             pending.pop(uid, None)
             context.user_data.clear()
-            await update.effective_message.reply_text("✅ Hesap başarıyla bağlandı ve kullanıcı adı kaydedildi!", reply_markup=get_keyboard(uid))
+            await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
         except SessionPasswordNeededError:
             context.user_data["flow"] = "2fa"
             await update.effective_message.reply_text("🔒 2FA şifrenizi girin:")
