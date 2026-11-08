@@ -115,7 +115,7 @@ async def show_guide(update, context):
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- REKLAM GÖNDERİM MOTORU (KESİNTİSİZ OTOMATİK DÖNGÜ) ---
+# --- REKLAM GÖNDERİM MOTORU (KESİNTİSİZ OTOMATİK DÖNGÜ & PREMİUM EMOJİ DESTEĞİ) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
     if not has_valid_access(uid):
         return
@@ -168,13 +168,17 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
                 custom_text = db.get_account_custom_text(s_name)
                 ad_text = ""
+                ad_entities = None
+                
                 if custom_text:
                     ad_text = custom_text
                 else:
                     try:
                         messages = await client.get_messages("me", limit=1)
                         if messages:
-                            ad_text = getattr(messages[0], 'text', '') or getattr(messages[0], 'message', '')
+                            msg = messages[0]
+                            ad_text = getattr(msg, 'text', '') or getattr(msg, 'message', '')
+                            ad_entities = getattr(msg, 'entities', None) # Özel premium emoji/biçimlendirme entitileri yakalanıyor
                     except:
                         pass
                 
@@ -214,7 +218,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
                     
                     try:
-                        await client.send_message(group.id, ad_text, parse_mode='md')
+                        # Premium/Özel Emojilerin kaybolmaması için entities parametresi ile gönderim yapılıyor
+                        await client.send_message(group.id, ad_text, formatting_entities=ad_entities)
                         success_count += 1
                     except FloodWaitError as exc:
                         log.warning(f"Spam riski algılandı! FloodWait: {exc.seconds} saniye.")
@@ -227,7 +232,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         
                         await asyncio.sleep(exc.seconds + 10)
                         try:
-                            await client.send_message(group.id, ad_text, parse_mode='md')
+                            await client.send_message(group.id, ad_text, formatting_entities=ad_entities)
                             success_count += 1
                         except:
                             fail_count += 1
