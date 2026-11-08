@@ -1,3 +1,4 @@
-telethon
+Telethon
 python-telegram-bot
 flask
+psycopg2-binary
