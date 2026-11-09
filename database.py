@@ -4,10 +4,11 @@ import datetime
 import psycopg2
 import psycopg2.extras
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Render cache veya tırnak kaynaklı hataları önlemek için otomatik temizleme ekledik:
+raw_url = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL") or ""
+DATABASE_URL = raw_url.strip('"\'')
 
 def get_db():
-    # Çift sslmode çakışmasını önlemek için parametreyi kaldırdık, Supabase havuz bağlantısı zaten kendi içinde yönetir.
     conn = psycopg2.connect(DATABASE_URL)
     return conn
 
