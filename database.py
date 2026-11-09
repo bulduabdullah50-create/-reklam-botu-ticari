@@ -7,7 +7,8 @@ import psycopg2.extras
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    # Çift sslmode çakışmasını önlemek için parametreyi kaldırdık, Supabase havuz bağlantısı zaten kendi içinde yönetir.
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def init_db():
