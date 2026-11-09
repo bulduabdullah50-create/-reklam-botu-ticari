@@ -4,12 +4,11 @@ import datetime
 import psycopg2
 import psycopg2.extras
 
-# Render cache veya tırnak kaynaklı hataları önlemek için otomatik temizleme ekledik:
-raw_url = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL") or ""
-DATABASE_URL = raw_url.strip('"\'')
-
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL)
+    # Render'da hangi değişken adını yaptıysan hepsini kontrol eder ve tırnakları tertemiz temizler
+    raw_url = os.environ.get("DB_URL") or os.environ.get("DATABASE_URL") or ""
+    clean_url = raw_url.strip().strip('"').strip("'").strip()
+    conn = psycopg2.connect(clean_url)
     return conn
 
 def init_db():
