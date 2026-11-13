@@ -115,7 +115,7 @@ async def show_guide(update, context):
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- REKLAM GÖNDERİM MOTORU (KESİN DURDURMA & HATASIZ PREMİUM EMOJİ KORUMASI) ---
+# --- PROFESYONEL REKLAM GÖNDERİM MOTORU (GÜVENLİ HATA YÖNETİMİ & FORWARD KORUMALI) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
     if not has_valid_access(uid):
         return
@@ -136,7 +136,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 break
             
             user_data = db.get_user(uid)
-            # Genel başlat/durdur bayrağı 0 olduysa veya görev listeden silindiyse döngüyü tamamen kır
             if not target_s_name and user_data.get("is_running", 0) == 0:
                 break
             if task_key not in tasks:
@@ -154,7 +153,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 continue
 
             for s_name, phone, s_string in active_sessions:
-                # Döngü içinde her hesap geçişinde durdurma kontrolü
                 if task_key not in tasks or (not target_s_name and db.get_user(uid).get("is_running", 0) == 0): 
                     break
                 
@@ -167,28 +165,30 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     if not await client.is_user_authorized():
                         await client.disconnect()
                         continue
-                except Exception:
+                except Exception as e:
+                    log.error(f"Client bağlantı hatası ({phone}): {e}")
+                    if client:
+                        try: await client.disconnect()
+                        except: pass
                     continue
 
+                # --- GÜVENLİ MESAJ VE NESNE ÇEKİMİ ---
                 custom_text = db.get_account_custom_text(s_name)
-                ad_text = ""
-                ad_entities = None
+                saved_message_obj = None
                 
-                if custom_text:
-                    ad_text = custom_text
-                else:
+                if not custom_text:
                     try:
                         messages = await client.get_messages("me", limit=1)
-                        if messages:
-                            msg = messages[0]
-                            ad_text = getattr(msg, 'text', '') or getattr(msg, 'message', '')
-                            # Telegram Premium emojileri ve özgün stiller bozulmadan orijinal nesnesiyle çekiliyor
-                            ad_entities = getattr(msg, 'entities', None)
-                    except:
-                        pass
-                
-                if not ad_text:
-                    await client.disconnect()
+                        if messages and messages[0]:
+                            saved_message_obj = messages[0]
+                    except Exception as e:
+                        log.warning(f"Kayıtlı mesaj alınamadı ({phone}): {e}")
+
+                # İçerik doğrulama
+                check_val = custom_text if custom_text else (getattr(saved_message_obj, 'text', '') or getattr(saved_message_obj, 'message', '') if saved_message_obj else "")
+                if not check_val:
+                    try: await client.disconnect()
+                    except: pass
                     continue
 
                 try:
@@ -196,12 +196,15 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     async for dialog in client.iter_dialogs():
                         if dialog.is_group or (dialog.is_channel and getattr(dialog.entity, 'megagroup', False)):
                             groups.append(dialog)
-                except Exception:
-                    await client.disconnect()
+                except Exception as e:
+                    log.error(f"Grup listesi alınamadı ({phone}): {e}")
+                    try: await client.disconnect()
+                    except: pass
                     continue
 
                 if not groups:
-                    await client.disconnect()
+                    try: await client.disconnect()
+                    except: pass
                     continue
 
                 user_bl = blacklisted_groups.get(uid, set())
@@ -213,7 +216,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 loop_interval = db.get_account_loop(s_name)
 
                 for group in groups:
-                    # Grup gönderim aralarında durdurma kontrolü
                     if task_key not in tasks or (not target_s_name and db.get_user(uid).get("is_running", 0) == 0): 
                         break
                     
@@ -226,32 +228,36 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
                     
                     try:
-                        # Bozulma olmadan, premium emojiler ve orijinal metin yapısıyla gönderim
-                        if ad_entities:
-                            await client.send_message(group.id, ad_text, formatting_entities=ad_entities)
+                        # PROFESYONEL İLETME VE GÖNDERİM KORUMASI:
+                        # Özel metin yoksa orijinal mesaj nesnesi (Premium emojiler ve stiller dahil) doğrudan kopyalanır (Forward).
+                        # Varsa özel metin ham olarak basılır. Asla yıldız eklenmez, bozulmaz.
+                        if not custom_text and saved_message_obj:
+                            await client.forward_messages(group.id, saved_message_obj)
                         else:
-                            await client.send_message(group.id, ad_text, parse_mode=None)
+                            await client.send_message(group.id, custom_text, parse_mode=None)
+                        
                         success_count += 1
                     except FloodWaitError as exc:
                         log.warning(f"Spam riski algılandı! FloodWait: {exc.seconds} saniye.")
                         try:
                             await context.bot.send_message(
                                 chat_id=chat_id, 
-                                text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** Hesap spam sınırına yaklaştı."
+                                text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** Hesap spam sınırına yaklaştı ({exc.seconds}s bekleme)."
                             )
                         except: pass
                         
-                        await asyncio.sleep(exc.seconds + 10)
+                        await asyncio.sleep(exc.seconds + 5)
                         try:
-                            if ad_entities:
-                                await client.send_message(group.id, ad_text, formatting_entities=ad_entities)
+                            if not custom_text and saved_message_obj:
+                                await client.forward_messages(group.id, saved_message_obj)
                             else:
-                                await client.send_message(group.id, ad_text, parse_mode=None)
+                                await client.send_message(group.id, custom_text, parse_mode=None)
                             success_count += 1
                         except:
                             fail_count += 1
                             failed_group_list.append(g_title)
-                    except Exception:
+                    except Exception as exc:
+                        log.error(f"Mesaj gönderim hatası ({g_title}): {exc}")
                         fail_count += 1
                         failed_group_list.append(g_title)
                     
@@ -269,10 +275,13 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     await context.bot.send_message(chat_id=chat_id, text=report_text, parse_mode="Markdown")
                 except: pass
 
-                try: await client.disconnect()
+                # Güvenli bağlantı koparma (Her hesap turu bitiminde)
+                try: 
+                    if client:
+                        await client.disconnect()
                 except: pass
 
-                # Tur aralarında durdurma kontrolüyle bekleme
+                # Tur aralarında anlık durdurma duyarlı güvenli uyku döngüsü
                 for _ in range(loop_interval):
                     if task_key not in tasks or (not target_s_name and db.get_user(uid).get("is_running", 0) == 0):
                         break
@@ -281,13 +290,12 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.exception("Döngü hatası: %s", e)
+            log.exception("Döngü kritik hata: %s", e)
             await asyncio.sleep(15)
             
     tasks.pop(task_key, None)
 
 async def stop_sender(uid, chat_id, context, target_s_name=None):
-    # Veritabanında is_running bayrağını sıfırla ki döngü anında anlasın ve dursun
     if not target_s_name:
         db.set_user(uid, is_running=0)
     
@@ -296,21 +304,26 @@ async def stop_sender(uid, chat_id, context, target_s_name=None):
     if task and not task.done():
         task.cancel()
         tasks.pop(task_key, None)
-    await context.bot.send_message(chat_id=chat_id, text="⏹ **Reklam otomasyonu durduruldu.**")
+    try:
+        await context.bot.send_message(chat_id=chat_id, text="⏹ **Reklam otomasyonu güvenli bir şekilde durduruldu.**")
+    except: pass
 
 async def resume_active_users_background(application):
     await asyncio.sleep(5)
-    running_users = db.get_all_running_users()
-    for uid in running_users:
-        if db.license_valid(uid, ADMIN_ID):
-            try:
-                class DummyContext:
-                    def __init__(self, bot):
-                        self.bot = bot
-                tasks[f"{uid}_auto_all_accounts"] = asyncio.create_task(sender_loop(uid, DummyContext(application.bot), uid))
-                log.info(f"Kullanıcı {uid} otomatik olarak kaldığı yerden başlatıldı.")
-            except Exception as e:
-                log.error(f"Kullanıcı {uid} başlatılamadı: {e}")
+    try:
+        running_users = db.get_all_running_users()
+        for uid in running_users:
+            if db.license_valid(uid, ADMIN_ID):
+                try:
+                    class DummyContext:
+                        def __init__(self, bot):
+                            self.bot = bot
+                    tasks[f"{uid}_auto_all_accounts"] = asyncio.create_task(sender_loop(uid, DummyContext(application.bot), uid))
+                    log.info(f"Kullanıcı {uid} otomatik olarak kaldığı yerden başlatıldı.")
+                except Exception as e:
+                    log.error(f"Kullanıcı {uid} başlatılamadı: {e}")
+    except Exception as e:
+        log.error(f"Background resume hatası: {e}")
 
 async def post_init(application):
     asyncio.create_task(resume_active_users_background(application))
