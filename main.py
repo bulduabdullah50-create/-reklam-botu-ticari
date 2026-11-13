@@ -115,7 +115,7 @@ async def show_guide(update, context):
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- REKLAM GÖNDERİM MOTORU (ORİJİNAL YAPİ & PREMİUM EMOJİ KORUMALI) ---
+# --- REKLAM GÖNDERİM MOTORU (BİREBİR KUSURSUZ AKTARIM & PREMIUM EMOJİ KORUMALI) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
     if not has_valid_access(uid):
         return
@@ -172,13 +172,14 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 
                 if custom_text:
                     ad_text = custom_text
+                    # Özel metin girildiyse ham metin olarak gönderilir
                 else:
                     try:
                         messages = await client.get_messages("me", limit=1)
                         if messages:
                             msg = messages[0]
                             ad_text = getattr(msg, 'text', '') or getattr(msg, 'message', '')
-                            # Telegram Premium emojileri ve özel nesnelerin kaybolmaması için entities alınıyor
+                            # Telegram Premium emojileri ve stiller bozulmadan orijinal nesnesiyle çekiliyor
                             ad_entities = getattr(msg, 'entities', None)
                     except:
                         pass
@@ -219,11 +220,11 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
                     
                     try:
-                        # Orijinal yapı neyse (Premium emoji dahil) bizzat aynen gönderilir
+                        # Emojiler ve biçimlendirmeler asla bozulmadan orijinal entities ile birebir fırlatılır
                         if ad_entities:
                             await client.send_message(group.id, ad_text, formatting_entities=ad_entities)
                         else:
-                            await client.send_message(group.id, ad_text)
+                            await client.send_message(group.id, ad_text, parse_mode=None)
                         success_count += 1
                     except FloodWaitError as exc:
                         log.warning(f"Spam riski algılandı! FloodWait: {exc.seconds} saniye.")
@@ -239,7 +240,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             if ad_entities:
                                 await client.send_message(group.id, ad_text, formatting_entities=ad_entities)
                             else:
-                                await client.send_message(group.id, ad_text)
+                                await client.send_message(group.id, ad_text, parse_mode=None)
                             success_count += 1
                         except:
                             fail_count += 1
