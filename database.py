@@ -5,7 +5,7 @@ import psycopg2
 import psycopg2.pool
 import psycopg2.extras
 
-# Global bağlantı havuzu (Her seferinde yeniden bağlanma gecikmesini yok eder)
+# Global bağlantı havuzu (Her seferinde yeniden bağlanma gecikmesini ve havuz şişmesini önler)
 _db_pool = None
 
 def get_connection_pool():
@@ -13,8 +13,8 @@ def get_connection_pool():
     if _db_pool is None:
         raw_url = os.environ.get("DB_URL") or os.environ.get("DATABASE_URL") or ""
         clean_url = raw_url.strip().strip('"').strip("'").strip()
-        # Min 1, Max 10 bağlantılık hızlı bir havuz oluşturuyoruz
-        _db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, clean_url)
+        # Min 1, Max 10 bağlantılık hızlı havuz ve UTF-8 karakter kodlaması garantisi
+        _db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, clean_url, options="-c client_encoding=UTF8")
     return _db_pool
 
 def get_db():
@@ -49,7 +49,8 @@ def init_db():
                         username TEXT DEFAULT '',
                         custom_text TEXT DEFAULT '',
                         delay_seconds INTEGER DEFAULT 3,
-                        loop_seconds INTEGER DEFAULT 240
+                        loop_seconds INTEGER DEFAULT 240,
+                        is_running INTEGER DEFAULT 0
                     )''')
         
         c.execute('''CREATE TABLE IF NOT EXISTS licenses (
