@@ -53,6 +53,12 @@ def init_db():
                         is_running INTEGER DEFAULT 0
                     )''')
         
+        # Mevcut veritabanlarında eksik olabilecek kolonlar için güvenli migration (ALTER TABLE)
+        try:
+            c.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_running INTEGER DEFAULT 0;")
+        except:
+            conn.rollback()
+
         c.execute('''CREATE TABLE IF NOT EXISTS licenses (
                         code TEXT PRIMARY KEY,
                         duration_days INTEGER,
