@@ -115,7 +115,7 @@ async def show_guide(update, context):
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- REKLAM GÖNDERİM MOTORU (BİREBİR KUSURSUZ AKTARIM & PREMIUM EMOJİ KORUMALI) ---
+# --- REKLAM GÖNDERİM MOTORU (KESİN DURDURMA & HATASIZ PREMİUM EMOJİ KORUMASI) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
     if not has_valid_access(uid):
         return
@@ -136,7 +136,10 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 break
             
             user_data = db.get_user(uid)
+            # Genel başlat/durdur bayrağı 0 olduysa veya görev listeden silindiyse döngüyü tamamen kır
             if not target_s_name and user_data.get("is_running", 0) == 0:
+                break
+            if task_key not in tasks:
                 break
 
             db_sessions = db.get_user_sessions_db(uid)
@@ -151,6 +154,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 continue
 
             for s_name, phone, s_string in active_sessions:
+                # Döngü içinde her hesap geçişinde durdurma kontrolü
                 if task_key not in tasks or (not target_s_name and db.get_user(uid).get("is_running", 0) == 0): 
                     break
                 
@@ -172,14 +176,13 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 
                 if custom_text:
                     ad_text = custom_text
-                    # Özel metin girildiyse ham metin olarak gönderilir
                 else:
                     try:
                         messages = await client.get_messages("me", limit=1)
                         if messages:
                             msg = messages[0]
                             ad_text = getattr(msg, 'text', '') or getattr(msg, 'message', '')
-                            # Telegram Premium emojileri ve stiller bozulmadan orijinal nesnesiyle çekiliyor
+                            # Telegram Premium emojileri ve özgün stiller bozulmadan orijinal nesnesiyle çekiliyor
                             ad_entities = getattr(msg, 'entities', None)
                     except:
                         pass
@@ -210,7 +213,10 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 loop_interval = db.get_account_loop(s_name)
 
                 for group in groups:
-                    if task_key not in tasks: break
+                    # Grup gönderim aralarında durdurma kontrolü
+                    if task_key not in tasks or (not target_s_name and db.get_user(uid).get("is_running", 0) == 0): 
+                        break
+                    
                     g_id, g_title = str(group.id), getattr(group, 'title', 'Grup')
                     entity = getattr(group, 'entity', None)
                     g_username = f"@{entity.username}".lower() if entity and getattr(entity, 'username', None) else ""
@@ -220,7 +226,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
                     
                     try:
-                        # Emojiler ve biçimlendirmeler asla bozulmadan orijinal entities ile birebir fırlatılır
+                        # Bozulma olmadan, premium emojiler ve orijinal metin yapısıyla gönderim
                         if ad_entities:
                             await client.send_message(group.id, ad_text, formatting_entities=ad_entities)
                         else:
@@ -266,7 +272,11 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 try: await client.disconnect()
                 except: pass
 
-                await asyncio.sleep(loop_interval)
+                # Tur aralarında durdurma kontrolüyle bekleme
+                for _ in range(loop_interval):
+                    if task_key not in tasks or (not target_s_name and db.get_user(uid).get("is_running", 0) == 0):
+                        break
+                    await asyncio.sleep(1)
 
         except asyncio.CancelledError:
             break
@@ -277,8 +287,10 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
     tasks.pop(task_key, None)
 
 async def stop_sender(uid, chat_id, context, target_s_name=None):
+    # Veritabanında is_running bayrağını sıfırla ki döngü anında anlasın ve dursun
     if not target_s_name:
         db.set_user(uid, is_running=0)
+    
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
     task = tasks.get(task_key)
     if task and not task.done():
