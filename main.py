@@ -231,7 +231,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
                     
                     try:
-                        # KUSURSUZ GÖNDERİM: Premium emojiler ve orijinal stil verileriyle tam uyumlu gönderim
+                        # KUSURSUZ KÖNDERİM: Premium emojiler ve orijinal stil verileriyle tam uyumlu gönderim
                         if ad_entities:
                             await client.send_message(
                                 group.id, 
