@@ -115,7 +115,7 @@ async def show_guide(update, context):
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- PROFESYONEL REKLAM GÖNDERİM MOTORU (formatting_entities & parse_mode=None KORUMALI) ---
+# --- PROFESYONEL REKLAM GÖNDERİM MOTORU (PREMIUM EMOJİ KORUMALI) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
     if not has_valid_access(uid):
         return
@@ -172,7 +172,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         except: pass
                     continue
 
-                # --- KAYITLI MESAJLAR'DAN METİN VE FORMAT ENTITIES (PREMIUM EMOJİLER) ÇEKİMİ ---
+                # --- KAYITLI MESAJLAR'DAN PREMIUM EMOJİ VE METİN ÇEKİMİ ---
                 custom_text = db.get_account_custom_text(s_name)
                 ad_text = ""
                 ad_entities = None
@@ -231,8 +231,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
                     
                     try:
-                        # KUSURSUZ GÖNDERİM: Yıldız eklemeden, parse etmeden doğrudan orijinal entities ile basım
-                        if not custom_text and ad_entities:
+                        # KUSURSUZ GÖNDERİM: Premium emojiler ve orijinal stil verileriyle tam uyumlu gönderim
+                        if ad_entities:
                             await client.send_message(
                                 group.id, 
                                 ad_text, 
@@ -258,7 +258,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         
                         await asyncio.sleep(exc.seconds + 5)
                         try:
-                            if not custom_text and ad_entities:
+                            if ad_entities:
                                 await client.send_message(
                                     group.id, 
                                     ad_text, 
