@@ -48,6 +48,7 @@ def init_db():
                         session_string TEXT,
                         username TEXT DEFAULT '',
                         custom_text TEXT DEFAULT '',
+                        custom_entities TEXT DEFAULT '',
                         delay_seconds INTEGER DEFAULT 3,
                         loop_seconds INTEGER DEFAULT 240,
                         is_running INTEGER DEFAULT 0
@@ -56,6 +57,7 @@ def init_db():
         # Mevcut veritabanlarında eksik olabilecek kolonlar için güvenli migration (ALTER TABLE)
         try:
             c.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_running INTEGER DEFAULT 0;")
+            c.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS custom_entities TEXT DEFAULT '';")
         except:
             conn.rollback()
 
@@ -182,6 +184,27 @@ def get_account_custom_text(session_name):
         row = c.fetchone()
         c.close()
         return row["custom_text"] if row and row["custom_text"] else ""
+    finally:
+        release_db(conn)
+
+def set_account_custom_entities(session_name, entities):
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE sessions SET custom_entities = %s WHERE session_name = %s", (entities, session_name))
+        conn.commit()
+        c.close()
+    finally:
+        release_db(conn)
+
+def get_account_custom_entities(session_name):
+    conn = get_db()
+    try:
+        c = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        c.execute("SELECT custom_entities FROM sessions WHERE session_name = %s", (session_name,))
+        row = c.fetchone()
+        c.close()
+        return row["custom_entities"] if row and row["custom_entities"] else None
     finally:
         release_db(conn)
 
