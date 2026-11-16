@@ -115,7 +115,7 @@ async def show_guide(update, context):
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- PROFESYONEL REKLAM GÖNDERİM MOTORU (GÜVENLİ HATA YÖNETİMİ & FORWARD KORUMALI) ---
+# --- PROFESYONEL REKLAM GÖNDERİM MOTORU (formatting_entities & parse_mode=None KORUMALI) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
     if not has_valid_access(uid):
         return
@@ -172,21 +172,24 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         except: pass
                     continue
 
-                # --- GÜVENLİ MESAJ VE NESNE ÇEKİMİ ---
+                # --- KAYITLI MESAJLAR'DAN METİN VE FORMAT ENTITIES (PREMIUM EMOJİLER) ÇEKİMİ ---
                 custom_text = db.get_account_custom_text(s_name)
-                saved_message_obj = None
+                ad_text = ""
+                ad_entities = None
                 
-                if not custom_text:
+                if custom_text:
+                    ad_text = custom_text
+                else:
                     try:
                         messages = await client.get_messages("me", limit=1)
                         if messages and messages[0]:
-                            saved_message_obj = messages[0]
+                            msg = messages[0]
+                            ad_text = getattr(msg, 'text', '') or getattr(msg, 'message', '')
+                            ad_entities = getattr(msg, 'entities', None)
                     except Exception as e:
                         log.warning(f"Kayıtlı mesaj alınamadı ({phone}): {e}")
 
-                # İçerik doğrulama
-                check_val = custom_text if custom_text else (getattr(saved_message_obj, 'text', '') or getattr(saved_message_obj, 'message', '') if saved_message_obj else "")
-                if not check_val:
+                if not ad_text:
                     try: await client.disconnect()
                     except: pass
                     continue
@@ -228,13 +231,20 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
                     
                     try:
-                        # PROFESYONEL İLETME VE GÖNDERİM KORUMASI:
-                        # Özel metin yoksa orijinal mesaj nesnesi (Premium emojiler ve stiller dahil) doğrudan kopyalanır (Forward).
-                        # Varsa özel metin ham olarak basılır. Asla yıldız eklenmez, bozulmaz.
-                        if not custom_text and saved_message_obj:
-                            await client.forward_messages(group.id, saved_message_obj)
+                        # KUSURSUZ GÖNDERİM: Yıldız eklemeden, parse etmeden doğrudan orijinal entities ile basım
+                        if not custom_text and ad_entities:
+                            await client.send_message(
+                                group.id, 
+                                ad_text, 
+                                formatting_entities=ad_entities, 
+                                parse_mode=None
+                            )
                         else:
-                            await client.send_message(group.id, custom_text, parse_mode=None)
+                            await client.send_message(
+                                group.id, 
+                                ad_text, 
+                                parse_mode=None
+                            )
                         
                         success_count += 1
                     except FloodWaitError as exc:
@@ -248,10 +258,19 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         
                         await asyncio.sleep(exc.seconds + 5)
                         try:
-                            if not custom_text and saved_message_obj:
-                                await client.forward_messages(group.id, saved_message_obj)
+                            if not custom_text and ad_entities:
+                                await client.send_message(
+                                    group.id, 
+                                    ad_text, 
+                                    formatting_entities=ad_entities, 
+                                    parse_mode=None
+                                )
                             else:
-                                await client.send_message(group.id, custom_text, parse_mode=None)
+                                await client.send_message(
+                                    group.id, 
+                                    ad_text, 
+                                    parse_mode=None
+                                )
                             success_count += 1
                         except:
                             fail_count += 1
@@ -275,13 +294,11 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     await context.bot.send_message(chat_id=chat_id, text=report_text, parse_mode="Markdown")
                 except: pass
 
-                # Güvenli bağlantı koparma (Her hesap turu bitiminde)
                 try: 
                     if client:
                         await client.disconnect()
                 except: pass
 
-                # Tur aralarında anlık durdurma duyarlı güvenli uyku döngüsü
                 for _ in range(loop_interval):
                     if task_key not in tasks or (not target_s_name and db.get_user(uid).get("is_running", 0) == 0):
                         break
