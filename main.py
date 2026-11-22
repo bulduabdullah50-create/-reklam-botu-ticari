@@ -418,6 +418,7 @@ def _is_unauthorized_session_error(err: Exception) -> bool:
 async def sender_loop(uid, context, chat_id, target_s_name=None):
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
     active_clients = {}
+    tour_index = 0
 
     try:
         while True:
@@ -452,9 +453,10 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
             if not active_sessions:
                 await _sleep_exact_seconds(15, uid, task_key, target_s_name)
-                if target_s_name:
-                    break
                 continue
+
+            tour_index += 1
+            log.info(f"[{task_key}] Tur #{tour_index} başladı | hesap sayısı: {len(active_sessions)}")
 
             for s_name, phone, s_string in active_sessions:
                 if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
@@ -604,12 +606,11 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 except Exception:
                     pass
 
+                log.info(f"[{phone}] Tur #{tour_index} bitti | dinlenme: {loop_interval}s")
                 await _safe_disconnect(active_clients.pop(s_name, None))
                 if loop_interval > 0:
                     await _sleep_exact_seconds(loop_interval, uid, task_key, target_s_name)
-
-            if target_s_name:
-                break
+                log.info(f"[{phone}] Tur dinlenmesi bitti, sonraki tura geçiliyor.")
 
     except asyncio.CancelledError:
         pass
