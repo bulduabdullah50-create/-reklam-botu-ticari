@@ -137,27 +137,82 @@ async def start_sender(uid, chat_id, context, target_s_name=None):
         return
 
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
-    if task_key in tasks and not tasks[task_key].done():
+    existing = tasks.get(task_key)
+    if existing and not existing.done():
         return
 
     if not target_s_name:
         db.set_user(uid, is_running=1)
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
 
-async def _send_single_message(client, group_id, ad_text, ad_entities):
-    if ad_entities:
-        await client.send_message(
-            group_id,
-            ad_text,
-            formatting_entities=ad_entities,
-            parse_mode=None
-        )
-    else:
-        await client.send_message(
-            group_id,
-            clean_bold_stars(ad_text),
-            parse_mode=None
-        )
+async def _build_telethon_client(s_string):
+    clean_string = s_string.strip().strip('"').strip("'").replace("\n", "").strip()
+    return TelegramClient(
+        StringSession(clean_string),
+        API_ID,
+        API_HASH,
+        connection_retries=5,
+        retry_delay=3,
+        auto_reconnect=False,
+        timeout=25
+    )
+
+async def _ensure_client_connected(client, s_string, phone):
+    if client is None:
+        client = await _build_telethon_client(s_string)
+    if not client.is_connected():
+        await client.connect()
+    if not await client.is_user_authorized():
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        raise RuntimeError(f"Oturum yetkisiz ({phone})")
+    return client
+
+async def _safe_disconnect(client):
+    if client is None:
+        return
+    try:
+        if client.is_connected():
+            await client.disconnect()
+    except Exception:
+        pass
+
+async def _send_single_message(client, s_string, phone, group_id, ad_text, ad_entities):
+    client = await _ensure_client_connected(client, s_string, phone)
+    try:
+        if ad_entities:
+            await client.send_message(
+                group_id,
+                ad_text,
+                formatting_entities=ad_entities,
+                parse_mode=None
+            )
+        else:
+            await client.send_message(
+                group_id,
+                clean_bold_stars(ad_text),
+                parse_mode=None
+            )
+        return client
+    except Exception:
+        await _safe_disconnect(client)
+        client = await _ensure_client_connected(None, s_string, phone)
+        if ad_entities:
+            await client.send_message(
+                group_id,
+                ad_text,
+                formatting_entities=ad_entities,
+                parse_mode=None
+            )
+        else:
+            await client.send_message(
+                group_id,
+                clean_bold_stars(ad_text),
+                parse_mode=None
+            )
+        return client
 
 async def _sleep_cancellable(seconds, uid, task_key, target_s_name):
     if seconds <= 0:
@@ -217,29 +272,11 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
                 client = active_clients.get(s_name)
                 try:
-                    if client is None or not client.is_connected():
-                        clean_string = s_string.strip().strip('"').strip("'").replace("\n", "").strip()
-                        client = TelegramClient(
-                            StringSession(clean_string),
-                            API_ID,
-                            API_HASH,
-                            connection_retries=2,
-                            auto_reconnect=True,
-                            timeout=20
-                        )
-                        await client.connect()
-                        if not await client.is_user_authorized():
-                            await client.disconnect()
-                            active_clients.pop(s_name, None)
-                            continue
-                        active_clients[s_name] = client
+                    client = await _ensure_client_connected(client, s_string, phone)
+                    active_clients[s_name] = client
                 except Exception as e:
                     log.error(f"Client bağlantı hatası ({phone}): {e}")
-                    if client:
-                        try:
-                            await client.disconnect()
-                        except Exception:
-                            pass
+                    await _safe_disconnect(client)
                     active_clients.pop(s_name, None)
                     continue
 
@@ -270,6 +307,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             groups.append(dialog)
                 except Exception as e:
                     log.error(f"Grup listesi alınamadı ({phone}): {e}")
+                    await _safe_disconnect(client)
+                    active_clients.pop(s_name, None)
                     continue
 
                 if not groups:
@@ -298,7 +337,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         continue
 
                     try:
-                        await _send_single_message(client, group.id, ad_text, ad_entities)
+                        client = await _send_single_message(client, s_string, phone, group.id, ad_text, ad_entities)
+                        active_clients[s_name] = client
                         success_count += 1
                     except FloodWaitError as exc:
                         log.warning(f"FloodWait ({phone}): {exc.seconds}s bekleniyor.")
@@ -312,7 +352,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
                         await _sleep_cancellable(exc.seconds, uid, task_key, target_s_name)
                         try:
-                            await _send_single_message(client, group.id, ad_text, ad_entities)
+                            client = await _send_single_message(client, s_string, phone, group.id, ad_text, ad_entities)
+                            active_clients[s_name] = client
                             success_count += 1
                         except Exception:
                             fail_count += 1
@@ -342,6 +383,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 if not target_s_name and db.get_user(uid).get("is_running", 0) == 0:
                     break
 
+                # Uzun beklemede oturum kimliği bayatlamasın diye bağlantıyı temiz kapat
+                await _safe_disconnect(active_clients.pop(s_name, None))
                 await _sleep_cancellable(loop_interval, uid, task_key, target_s_name)
 
             if target_s_name:
@@ -354,23 +397,19 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
         await asyncio.sleep(10)
     finally:
         for _, c in list(active_clients.items()):
-            try:
-                if c and c.is_connected():
-                    await c.disconnect()
-            except Exception:
-                pass
+            await _safe_disconnect(c)
         active_clients.clear()
-        tasks.pop(task_key, None)
+        if tasks.get(task_key) is asyncio.current_task():
+            tasks.pop(task_key, None)
 
 async def stop_sender(uid, chat_id, context, target_s_name=None):
     if not target_s_name:
         db.set_user(uid, is_running=0)
 
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
-    task = tasks.get(task_key)
+    task = tasks.pop(task_key, None)
     if task and not task.done():
         task.cancel()
-        tasks.pop(task_key, None)
     try:
         await context.bot.send_message(chat_id=chat_id, text="⏹ **Reklam otomasyonu güvenli bir şekilde durduruldu.**")
     except Exception:
@@ -382,11 +421,15 @@ async def resume_active_users_background(application):
         running_users = db.get_all_running_users()
         for uid in running_users:
             if db.license_valid(uid, ADMIN_ID):
+                task_key = f"{uid}_auto_all_accounts"
+                existing = tasks.get(task_key)
+                if existing and not existing.done():
+                    continue
                 try:
                     class DummyContext:
                         def __init__(self, bot):
                             self.bot = bot
-                    tasks[f"{uid}_auto_all_accounts"] = asyncio.create_task(
+                    tasks[task_key] = asyncio.create_task(
                         sender_loop(uid, DummyContext(application.bot), uid)
                     )
                     log.info(f"Kullanıcı {uid} otomatik olarak kaldığı yerden başlatıldı.")
@@ -541,7 +584,7 @@ async def button(update, context):
     elif action.startswith("del_"):
         s_name = action.replace("del_", "")
         db.delete_session_db(s_name)
-        clients.pop(s_name, None)
+        await _safe_disconnect(clients.pop(s_name, None))
         await q.edit_message_text("✅ Hesap silindi.", reply_markup=get_keyboard(uid))
     elif action == "blacklist":
         context.user_data["flow"] = "blacklist"
@@ -636,7 +679,7 @@ async def text_handler(update, context):
             val = int(text)
             db.set_account_delay(s_name, val)
             context.user_data["flow"] = f"acc_times_loop_{s_name}"
-            await update.effective_message.reply_text(f"⏱ Şimdi bu hesap için **Tur Dinlenme Süresini (saniye)** yazın (Örn: `600`):", reply_markup=sub_menu_keyboard())
+            await update.effective_message.reply_text("⏱ Şimdi bu hesap için **Tur Dinlenme Süresini (saniye)** yazın (Örn: `600`):", reply_markup=sub_menu_keyboard())
         except ValueError:
             await update.effective_message.reply_text("Lütfen geçerli bir sayı girin.")
         return
@@ -682,8 +725,18 @@ async def text_handler(update, context):
         if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
             await update.effective_message.reply_text("Geçerli numara girin (+90...)")
             return
+        old_pending = pending.pop(uid, None)
+        if old_pending:
+            await _safe_disconnect(old_pending.get("client"))
         session_name = f"SESSION_{uid}_{text}"
-        client = TelegramClient(StringSession(), API_ID, API_HASH, connection_retries=2, auto_reconnect=True)
+        client = TelegramClient(
+            StringSession(),
+            API_ID,
+            API_HASH,
+            connection_retries=3,
+            auto_reconnect=False,
+            timeout=20
+        )
         await client.connect()
         try:
             sent = await client.send_code_request(text)
@@ -691,7 +744,7 @@ async def text_handler(update, context):
             context.user_data["flow"] = "code"
             await update.effective_message.reply_text("📲 Telegram kodunu girin:")
         except Exception as e:
-            await client.disconnect()
+            await _safe_disconnect(client)
             await update.effective_message.reply_text(f"Hata: {e}")
 
     elif flow == "code":
@@ -704,7 +757,8 @@ async def text_handler(update, context):
             s_string = item["client"].session.save()
             me_user = await item["client"].get_me()
             username = me_user.username if me_user and me_user.username else ""
-            clients[s_name] = item["client"]
+            await _safe_disconnect(item["client"])
+            clients.pop(s_name, None)
             db.save_session_db(uid, s_name, item["phone"], s_string, username=username)
             pending.pop(uid, None)
             context.user_data.clear()
@@ -725,7 +779,8 @@ async def text_handler(update, context):
             s_string = item["client"].session.save()
             me_user = await item["client"].get_me()
             username = me_user.username if me_user and me_user.username else ""
-            clients[s_name] = item["client"]
+            await _safe_disconnect(item["client"])
+            clients.pop(s_name, None)
             db.save_session_db(uid, s_name, item["phone"], s_string, username=username)
             pending.pop(uid, None)
             context.user_data.clear()
