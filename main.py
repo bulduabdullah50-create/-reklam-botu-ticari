@@ -338,33 +338,29 @@ async def _send_single_message(client, s_string, phone, group_id, ad_text, ad_en
         return client
 
 
-def _is_task_stopped(uid: int, task_key: str, target_s_name: str | None) -> bool:
-    if task_key not in tasks:
-        return True
-    cur = tasks.get(task_key)
-    if cur is None or cur.done():
-        return True
-    if not target_s_name:
-        u_info = db.get_user(uid)
-        if (u_info or {}).get("is_running", 0) == 0:
-            return True
-    return False
-
-
-async def _sleep_cancellable(seconds, uid, task_key, target_s_name):
+async def _sleep_exact_seconds(seconds, uid, task_key, target_s_name):
     total = max(0, int(seconds or 0))
     if total <= 0:
         return
-    deadline = time.monotonic() + total
+    start_mono = time.monotonic()
+    target_mono = start_mono + float(total)
+    last_running_check = 0.0
+    is_still_running = True
+
     while True:
         if task_key not in tasks:
             raise asyncio.CancelledError()
-        if not target_s_name:
+
+        now_mono = time.monotonic()
+        if not target_s_name and (now_mono - last_running_check) >= 2.0:
+            last_running_check = now_mono
             u_info = await asyncio.to_thread(db.get_user, uid)
-            if (u_info or {}).get("is_running", 0) == 0:
+            is_still_running = (u_info or {}).get("is_running", 0) != 0
+            if not is_still_running:
                 raise asyncio.CancelledError()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+
+        remaining = target_mono - time.monotonic()
+        if remaining <= 0.0:
             break
         await asyncio.sleep(min(0.25, remaining))
 
@@ -374,7 +370,10 @@ async def _get_effective_delay(uid: int, s_name: str) -> int:
     if val is not None:
         return max(0, int(val))
     u_info = await asyncio.to_thread(db.get_user, uid) or {}
-    return max(0, int(u_info.get("interval_seconds", 3) or 3))
+    raw_user_delay = u_info.get("interval_seconds")
+    if raw_user_delay is not None:
+        return max(0, int(raw_user_delay))
+    return 15
 
 
 async def _get_effective_loop(uid: int, s_name: str) -> int:
@@ -382,7 +381,10 @@ async def _get_effective_loop(uid: int, s_name: str) -> int:
     if val is not None:
         return max(0, int(val))
     u_info = await asyncio.to_thread(db.get_user, uid) or {}
-    return max(0, int(u_info.get("loop_interval_seconds", 240) or 240))
+    raw_user_loop = u_info.get("loop_interval_seconds")
+    if raw_user_loop is not None:
+        return max(0, int(raw_user_loop))
+    return 240
 
 
 def _is_unauthorized_session_error(err: Exception) -> bool:
@@ -432,7 +434,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 ]
 
             if not active_sessions:
-                await _sleep_cancellable(15, uid, task_key, target_s_name)
+                await _sleep_exact_seconds(15, uid, task_key, target_s_name)
                 if target_s_name:
                     break
                 continue
@@ -521,6 +523,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     entity = getattr(group, "entity", None)
                     g_username = f"@{entity.username}".lower() if entity and getattr(entity, "username", None) else ""
 
+                    did_send = False
                     if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl_ids:
                         skipped_count += 1
                     else:
@@ -528,6 +531,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             client = await _send_single_message(client, s_string, phone, group.id, ad_text, ad_entities)
                             active_clients[s_name] = client
                             success_count += 1
+                            did_send = True
                         except asyncio.CancelledError:
                             raise
                         except FloodWaitError as exc:
@@ -540,13 +544,14 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             except Exception:
                                 pass
 
-                            await _sleep_cancellable(exc.seconds, uid, task_key, target_s_name)
+                            await _sleep_exact_seconds(exc.seconds, uid, task_key, target_s_name)
                             try:
                                 client = await _send_single_message(
                                     client, s_string, phone, group.id, ad_text, ad_entities
                                 )
                                 active_clients[s_name] = client
                                 success_count += 1
+                                did_send = True
                             except asyncio.CancelledError:
                                 raise
                             except Exception:
@@ -558,8 +563,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             failed_group_list.append(g_title)
 
                     group_interval = await _get_effective_delay(uid, s_name)
-                    if group_interval > 0 and idx < len(groups) - 1:
-                        await _sleep_cancellable(group_interval, uid, task_key, target_s_name)
+                    if did_send and group_interval > 0 and idx < len(groups) - 1:
+                        await _sleep_exact_seconds(group_interval, uid, task_key, target_s_name)
 
                 failed_reports_cache[s_name] = failed_group_list
                 loop_interval = await _get_effective_loop(uid, s_name)
@@ -583,7 +588,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
                 await _safe_disconnect(active_clients.pop(s_name, None))
                 if loop_interval > 0:
-                    await _sleep_cancellable(loop_interval, uid, task_key, target_s_name)
+                    await _sleep_exact_seconds(loop_interval, uid, task_key, target_s_name)
 
             if target_s_name:
                 break
@@ -745,8 +750,8 @@ async def button(update, context):
         )
     elif action.startswith("manage_"):
         s_name = action.replace("manage_", "")
-        cur_delay = await asyncio.to_thread(db.get_account_delay, s_name)
-        cur_loop = await asyncio.to_thread(db.get_account_loop, s_name)
+        cur_delay = await _get_effective_delay(uid, s_name)
+        cur_loop = await _get_effective_loop(uid, s_name)
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("▶ Başlat", callback_data=f"start_one_{s_name}"),
@@ -992,7 +997,7 @@ async def text_handler(update, context):
                 await update.effective_message.reply_text("Lütfen 0 veya daha büyük bir sayı girin.")
                 return
             await asyncio.to_thread(db.set_account_loop, s_name, val)
-            saved_delay = await asyncio.to_thread(db.get_account_delay, s_name)
+            saved_delay = await _get_effective_delay(uid, s_name)
             context.user_data.clear()
             await _restart_running_account_task_if_active(uid, s_name, update.effective_message.chat_id, context)
             await update.effective_message.reply_text(
