@@ -199,25 +199,38 @@ async def _cancel_task_immediately(task_key: str):
     if task and not task.done():
         task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=1.5)
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
         except Exception:
             pass
 
 
-async def start_sender(uid, chat_id, context, target_s_name=None, force_restart=False):
+async def _purge_user_stale_runs(uid: int, target_s_name: str | None = None):
+    stale_keys = [k for k in list(tasks.keys()) if k.startswith(f"{uid}_")]
+    for k in stale_keys:
+        await _cancel_task_immediately(k)
+
+    try:
+        user_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+        for s_name, _, _ in user_sessions or []:
+            if not target_s_name or s_name == target_s_name:
+                old_c = clients.pop(s_name, None)
+                await _safe_disconnect(old_c)
+    except Exception:
+        pass
+
+
+async def start_sender(uid, chat_id, context, target_s_name=None, force_restart=True):
     valid = await asyncio.to_thread(has_valid_access, uid)
     if not valid:
         return
 
-    task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
-    existing = tasks.get(task_key)
-    if existing and not existing.done():
-        if not force_restart:
-            return
-        await _cancel_task_immediately(task_key)
+    await _purge_user_stale_runs(uid, target_s_name=None if not target_s_name else target_s_name)
 
     if not target_s_name:
         await asyncio.to_thread(db.set_user, uid, is_running=1)
+        task_key = f"{uid}_auto_all_accounts"
+    else:
+        task_key = f"{uid}_acc_{target_s_name}"
 
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
 
@@ -348,7 +361,7 @@ async def _sleep_exact_seconds(seconds, uid, task_key, target_s_name):
     is_still_running = True
 
     while True:
-        if task_key not in tasks:
+        if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
             raise asyncio.CancelledError()
 
         now_mono = time.monotonic()
@@ -407,6 +420,9 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
     try:
         while True:
+            if tasks.get(task_key) is not asyncio.current_task():
+                break
+
             valid = await asyncio.to_thread(has_valid_access, uid)
             if not valid:
                 if not target_s_name:
@@ -440,7 +456,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 continue
 
             for s_name, phone, s_string in active_sessions:
-                if task_key not in tasks:
+                if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                     raise asyncio.CancelledError()
                 if not target_s_name:
                     u_chk = await asyncio.to_thread(db.get_user, uid)
@@ -490,7 +506,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 try:
                     groups = []
                     async for dialog in client.iter_dialogs():
-                        if task_key not in tasks:
+                        if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                             raise asyncio.CancelledError()
                         if dialog.is_group or (dialog.is_channel and getattr(dialog.entity, "megagroup", False)):
                             groups.append(dialog)
@@ -512,7 +528,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 failed_group_list = []
 
                 for idx, group in enumerate(groups):
-                    if task_key not in tasks:
+                    if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                         raise asyncio.CancelledError()
                     if not target_s_name:
                         u_chk2 = await asyncio.to_thread(db.get_user, uid)
@@ -563,13 +579,14 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             failed_group_list.append(g_title)
 
                     group_interval = await _get_effective_delay(uid, s_name)
+                    log.info(f"[{phone}] Grup adımı bitti | beklenen süre: {group_interval}s | did_send={did_send}")
                     if did_send and group_interval > 0 and idx < len(groups) - 1:
                         await _sleep_exact_seconds(group_interval, uid, task_key, target_s_name)
 
                 failed_reports_cache[s_name] = failed_group_list
                 loop_interval = await _get_effective_loop(uid, s_name)
 
-                if task_key not in tasks:
+                if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                     raise asyncio.CancelledError()
                 if not target_s_name:
                     u_chk3 = await asyncio.to_thread(db.get_user, uid)
