@@ -5,6 +5,7 @@ import logging
 import secrets
 import string
 import datetime
+import urllib.request
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient
@@ -20,11 +21,32 @@ app_web = Flask(__name__)
 def home_web():
     return "💎 FARKETMEZDA PLATINUM REKLAM BOTU AKTİF!"
 
+@app_web.route('/health')
+def health_web():
+    return "OK", 200
+
 def run_web():
-    app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app_web.run(host="0.0.0.0", port=port, use_reloader=False)
+
+def _keep_alive_worker():
+    port = int(os.environ.get("PORT", 10000))
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    target_url = f"{render_url}/health" if render_url else f"http://127.0.0.1:{port}/health"
+    while True:
+        try:
+            import time
+            time.sleep(240)  # Her 4 dakikada bir servisi sıcak tut
+            req = urllib.request.Request(target_url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as _:
+                pass
+        except Exception:
+            pass
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("farketmezda")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -74,26 +96,31 @@ def admin_keyboard():
         [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")]
     ])
 
+def _format_expiry_text(uid: int) -> str:
+    if is_admin(uid):
+        return "👑 Sınırsız Yönetici Yetkisi"
+    try:
+        expiry = db.get_user_expiry(uid)
+        if not expiry:
+            return "Süre Bulunmuyor ❌"
+        fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in str(expiry) else "%Y-%m-%d %H:%M:%S"
+        exp_dt = datetime.datetime.strptime(str(expiry), fmt)
+        remaining = exp_dt - datetime.datetime.now()
+        if remaining.total_seconds() > 0:
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            return f"🟢 Aktif ({days} Gün, {hours} Saat Kaldı)"
+        return "🔴 Süresi Dolmuş"
+    except Exception:
+        return "🟢 Aktif"
+
 async def show_home(update, context):
     uid = update.effective_user.id
-    db.ensure_user(uid, update.effective_user.username)
+    username = update.effective_user.username
 
-    expiry = db.get_user_expiry(uid)
-    expiry_str = "Süre Bulunmuyor ❌"
-    if expiry:
-        try:
-            exp_dt = datetime.datetime.strptime(expiry, "%Y-%m-%d %H:%M:%S.%f" if "." in expiry else "%Y-%m-%d %H:%M:%S")
-            remaining = exp_dt - datetime.datetime.now()
-            if remaining.total_seconds() > 0:
-                days = remaining.days
-                hours = remaining.seconds // 3600
-                expiry_str = f"🟢 Aktif ({days} Gün, {hours} Saat Kaldı)"
-            else:
-                expiry_str = "🔴 Süresi Dolmuş"
-        except Exception:
-            expiry_str = str(expiry)[:16]
-    if is_admin(uid):
-        expiry_str = "👑 Sınırsız Yönetici Yetkisi"
+    # Hızlı ilk yanıt için kullanıcı kaydını arka planda tetikleyip menüyü gecikmesiz basıyoruz
+    asyncio.create_task(asyncio.to_thread(db.ensure_user, uid, username))
+    expiry_str = await asyncio.to_thread(_format_expiry_text, uid)
 
     text = (
         "⚡ **FARKETMEZDA PLATINUM OTO REKLAM** ⚡\n"
@@ -105,7 +132,10 @@ async def show_home(update, context):
         "veya durdurabilirsiniz. Tüm işlemleriniz güvenli altyapımızla koruma altındadır. 👇"
     )
     if update.callback_query:
-        await update.callback_query.answer()
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=get_keyboard(uid))
     else:
         await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=get_keyboard(uid))
@@ -133,7 +163,8 @@ async def show_guide(update, context):
 
 # --- PROFESYONEL REKLAM GÖNDERİM MOTORU (PREMIUM EMOJİ KORUMALI) ---
 async def start_sender(uid, chat_id, context, target_s_name=None):
-    if not has_valid_access(uid):
+    valid = await asyncio.to_thread(has_valid_access, uid)
+    if not valid:
         return
 
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
@@ -142,7 +173,7 @@ async def start_sender(uid, chat_id, context, target_s_name=None):
         return
 
     if not target_s_name:
-        db.set_user(uid, is_running=1)
+        await asyncio.to_thread(db.set_user, uid, is_running=1)
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
 
 async def _build_telethon_client(s_string):
@@ -151,67 +182,57 @@ async def _build_telethon_client(s_string):
         StringSession(clean_string),
         API_ID,
         API_HASH,
-        connection_retries=5,
-        retry_delay=3,
+        connection_retries=4,
+        retry_delay=2,
         auto_reconnect=False,
         timeout=25
     )
-
-async def _ensure_client_connected(client, s_string, phone):
-    if client is None:
-        client = await _build_telethon_client(s_string)
-    if not client.is_connected():
-        await client.connect()
-    if not await client.is_user_authorized():
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-        raise RuntimeError(f"Oturum yetkisiz ({phone})")
-    return client
 
 async def _safe_disconnect(client):
     if client is None:
         return
     try:
         if client.is_connected():
-            await client.disconnect()
+            await asyncio.wait_for(client.disconnect(), timeout=5)
     except Exception:
         pass
 
+async def _ensure_client_connected(client, s_string, phone):
+    if client is None:
+        client = await _build_telethon_client(s_string)
+    if not client.is_connected():
+        await asyncio.wait_for(client.connect(), timeout=20)
+
+    me = None
+    for _ in range(2):
+        try:
+            me = await asyncio.wait_for(client.get_me(), timeout=12)
+            if me is not None:
+                break
+        except Exception:
+            await asyncio.sleep(1)
+
+    if me is None:
+        try:
+            authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=10)
+        except Exception:
+            authorized = False
+        if not authorized:
+            await _safe_disconnect(client)
+            raise RuntimeError(f"Oturum yetkisiz ({phone})")
+    return client
+
 async def _send_single_message(client, s_string, phone, group_id, ad_text, ad_entities):
     client = await _ensure_client_connected(client, s_string, phone)
+    payload_text = ad_text if ad_entities else clean_bold_stars(ad_text)
+    kwargs = {"formatting_entities": ad_entities, "parse_mode": None} if ad_entities else {"parse_mode": None}
     try:
-        if ad_entities:
-            await client.send_message(
-                group_id,
-                ad_text,
-                formatting_entities=ad_entities,
-                parse_mode=None
-            )
-        else:
-            await client.send_message(
-                group_id,
-                clean_bold_stars(ad_text),
-                parse_mode=None
-            )
+        await asyncio.wait_for(client.send_message(group_id, payload_text, **kwargs), timeout=20)
         return client
     except Exception:
         await _safe_disconnect(client)
         client = await _ensure_client_connected(None, s_string, phone)
-        if ad_entities:
-            await client.send_message(
-                group_id,
-                ad_text,
-                formatting_entities=ad_entities,
-                parse_mode=None
-            )
-        else:
-            await client.send_message(
-                group_id,
-                clean_bold_stars(ad_text),
-                parse_mode=None
-            )
+        await asyncio.wait_for(client.send_message(group_id, payload_text, **kwargs), timeout=20)
         return client
 
 async def _sleep_cancellable(seconds, uid, task_key, target_s_name):
@@ -223,7 +244,8 @@ async def _sleep_cancellable(seconds, uid, task_key, target_s_name):
         if task_key not in tasks:
             break
         if not target_s_name and remaining % 10 == 0:
-            if db.get_user(uid).get("is_running", 0) == 0:
+            u_info = await asyncio.to_thread(db.get_user, uid)
+            if (u_info or {}).get("is_running", 0) == 0:
                 break
         step = min(check_step, remaining)
         await asyncio.sleep(step)
@@ -235,31 +257,32 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
     try:
         while True:
-            if not has_valid_access(uid):
+            valid = await asyncio.to_thread(has_valid_access, uid)
+            if not valid:
                 if not target_s_name:
-                    db.set_user(uid, is_running=0)
+                    await asyncio.to_thread(db.set_user, uid, is_running=0)
                 break
 
-            user_data = db.get_user(uid)
-            if not target_s_name and user_data.get("is_running", 0) == 0:
+            user_data = await asyncio.to_thread(db.get_user, uid)
+            if not target_s_name and (user_data or {}).get("is_running", 0) == 0:
                 break
             if task_key not in tasks:
                 break
 
-            db_sessions = db.get_user_sessions_db(uid)
+            db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
             if target_s_name:
                 active_sessions = [
-                    (s[0], s[1], s[2]) for s in db_sessions
-                    if s[0] == target_s_name and s[2] and len(s[2].strip()) > 50
+                    (s[0], s[1], s[2]) for s in (db_sessions or [])
+                    if s[0] == target_s_name and s[2] and len(s[2].strip()) > 20
                 ]
             else:
                 active_sessions = [
-                    (s[0], s[1], s[2]) for s in db_sessions
-                    if s[2] and len(s[2].strip()) > 50
+                    (s[0], s[1], s[2]) for s in (db_sessions or [])
+                    if s[2] and len(s[2].strip()) > 20
                 ]
 
             if not active_sessions:
-                await asyncio.sleep(20)
+                await asyncio.sleep(15)
                 if target_s_name:
                     break
                 continue
@@ -267,8 +290,10 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
             for s_name, phone, s_string in active_sessions:
                 if task_key not in tasks:
                     break
-                if not target_s_name and db.get_user(uid).get("is_running", 0) == 0:
-                    break
+                if not target_s_name:
+                    u_chk = await asyncio.to_thread(db.get_user, uid)
+                    if (u_chk or {}).get("is_running", 0) == 0:
+                        break
 
                 client = active_clients.get(s_name)
                 try:
@@ -280,8 +305,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     active_clients.pop(s_name, None)
                     continue
 
-                # --- KAYITLI MESAJLAR'DAN PREMIUM EMOJİ VE METİN ÇEKİMİ ---
-                custom_text = db.get_account_custom_text(s_name)
+                custom_text = await asyncio.to_thread(db.get_account_custom_text, s_name)
                 ad_text = ""
                 ad_entities = None
 
@@ -289,7 +313,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     ad_text = clean_bold_stars(custom_text)
                 else:
                     try:
-                        messages = await client.get_messages("me", limit=1)
+                        messages = await asyncio.wait_for(client.get_messages("me", limit=1), timeout=15)
                         if messages and messages[0]:
                             msg = messages[0]
                             ad_text = getattr(msg, 'text', '') or getattr(msg, 'message', '')
@@ -315,18 +339,21 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     continue
 
                 user_bl = blacklisted_groups.get(uid, set())
-                acc_bl_ids = set(db.get_account_blacklist_db(s_name))
+                acc_bl_raw = await asyncio.to_thread(db.get_account_blacklist_db, s_name)
+                acc_bl_ids = set(acc_bl_raw or [])
                 success_count, fail_count, skipped_count = 0, 0, 0
                 failed_group_list = []
 
-                group_interval = int(db.get_account_delay(s_name))
-                loop_interval = int(db.get_account_loop(s_name))
+                group_interval = int(await asyncio.to_thread(db.get_account_delay, s_name) or 10)
+                loop_interval = int(await asyncio.to_thread(db.get_account_loop, s_name) or 300)
 
                 for group in groups:
                     if task_key not in tasks:
                         break
-                    if not target_s_name and db.get_user(uid).get("is_running", 0) == 0:
-                        break
+                    if not target_s_name:
+                        u_chk2 = await asyncio.to_thread(db.get_user, uid)
+                        if (u_chk2 or {}).get("is_running", 0) == 0:
+                            break
 
                     g_id, g_title = str(group.id), getattr(group, 'title', 'Grup')
                     entity = getattr(group, 'entity', None)
@@ -380,10 +407,11 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
                 if task_key not in tasks:
                     break
-                if not target_s_name and db.get_user(uid).get("is_running", 0) == 0:
-                    break
+                if not target_s_name:
+                    u_chk3 = await asyncio.to_thread(db.get_user, uid)
+                    if (u_chk3 or {}).get("is_running", 0) == 0:
+                        break
 
-                # Uzun beklemede oturum kimliği bayatlamasın diye bağlantıyı temiz kapat
                 await _safe_disconnect(active_clients.pop(s_name, None))
                 await _sleep_cancellable(loop_interval, uid, task_key, target_s_name)
 
@@ -394,7 +422,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
         pass
     except Exception as e:
         log.exception("Döngü kritik hata: %s", e)
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
     finally:
         for _, c in list(active_clients.items()):
             await _safe_disconnect(c)
@@ -404,7 +432,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
 async def stop_sender(uid, chat_id, context, target_s_name=None):
     if not target_s_name:
-        db.set_user(uid, is_running=0)
+        await asyncio.to_thread(db.set_user, uid, is_running=0)
 
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
     task = tasks.pop(task_key, None)
@@ -416,11 +444,12 @@ async def stop_sender(uid, chat_id, context, target_s_name=None):
         pass
 
 async def resume_active_users_background(application):
-    await asyncio.sleep(5)
+    await asyncio.sleep(3)
     try:
-        running_users = db.get_all_running_users()
-        for uid in running_users:
-            if db.license_valid(uid, ADMIN_ID):
+        running_users = await asyncio.to_thread(db.get_all_running_users)
+        for uid in (running_users or []):
+            valid = await asyncio.to_thread(db.license_valid, uid, ADMIN_ID)
+            if valid:
                 task_key = f"{uid}_auto_all_accounts"
                 existing = tasks.get(task_key)
                 if existing and not existing.done():
@@ -444,9 +473,12 @@ async def post_init(application):
 # --- CALLBACK VE ARAYÜZ YÖNETİMİ ---
 async def button(update, context):
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass
     uid, action = q.from_user.id, q.data
-    db.ensure_user(uid, q.from_user.username)
+    asyncio.create_task(asyncio.to_thread(db.ensure_user, uid, q.from_user.username))
 
     if action == "home":
         await show_home(update, context)
@@ -494,19 +526,19 @@ async def button(update, context):
         context.user_data["flow"] = "awaiting_receipt"
         await q.edit_message_text("📤 Lütfen yaptığınız ödemenin **dekont fotoğrafını** bota doğrudan gönderin:", reply_markup=sub_menu_keyboard())
     elif action == "add":
-        if not has_valid_access(uid):
+        if not await asyncio.to_thread(has_valid_access, uid):
             await q.edit_message_text("❌ Aktif lisansınız yok.", reply_markup=sub_menu_keyboard())
             return
         context.user_data["flow"] = "phone"
         await q.edit_message_text("➕ Telefon numaranızı +ülke kodu ile gönderin (`+90...`):", parse_mode="Markdown", reply_markup=sub_menu_keyboard())
     elif action == "accounts":
-        db_sessions = db.get_user_sessions_db(uid)
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
         if not db_sessions:
             await q.edit_message_text("👤 Kayıtlı hesabınız yok.", reply_markup=get_keyboard(uid))
             return
         rows = []
         for s_name, phone, _ in db_sessions:
-            uname = db.get_account_username(s_name)
+            uname = await asyncio.to_thread(db.get_account_username, s_name)
             display_str = f"@{uname} | {phone}" if uname else f"Kullanıcı Adı Yok | {phone}"
             rows.append([InlineKeyboardButton(f"📱 {display_str}", callback_data=f"manage_{s_name}")])
         rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
@@ -523,13 +555,13 @@ async def button(update, context):
         ])
         await q.edit_message_text("📱 **Hesap Yönetim Paneli**", reply_markup=kb)
     elif action == "account_config_menu":
-        db_sessions = db.get_user_sessions_db(uid)
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
         if not db_sessions:
             await q.edit_message_text("❌ Yapılandırılacak hesabınız yok.", reply_markup=get_keyboard(uid))
             return
         rows = []
         for s_name, phone, _ in db_sessions:
-            uname = db.get_account_username(s_name)
+            uname = await asyncio.to_thread(db.get_account_username, s_name)
             disp = f"@{uname}" if uname else phone
             rows.append([InlineKeyboardButton(f"⚙️ Ayarla: {disp}", callback_data=f"manage_{s_name}")])
         rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
@@ -554,13 +586,13 @@ async def button(update, context):
         context.user_data["flow"] = f"acc_times_delay_{s_name}"
         await q.edit_message_text("⏱ Bu hesap için **grup arası bekleme süresini (saniye)** yazın (Örn: `10`):", reply_markup=sub_menu_keyboard())
     elif action == "start_stop_menu":
-        db_sessions = db.get_user_sessions_db(uid)
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
         if not db_sessions:
             await q.edit_message_text("❌ Yönetilecek hesabınız yok.", reply_markup=get_keyboard(uid))
             return
         rows = []
         for s_name, phone, _ in db_sessions:
-            uname = db.get_account_username(s_name)
+            uname = await asyncio.to_thread(db.get_account_username, s_name)
             disp = f"@{uname}" if uname else phone
             rows.append([
                 InlineKeyboardButton(f"▶ Başlat: {disp}", callback_data=f"start_one_{s_name}"),
@@ -569,9 +601,9 @@ async def button(update, context):
         rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
         await q.edit_message_text("▶️ **ANA PANELDEN BAŞLAT / DURDUR KONTROLÜ**", reply_markup=InlineKeyboardMarkup(rows))
     elif action == "failed_reports":
-        db_sessions = db.get_user_sessions_db(uid)
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
         report_lines = ["📊 **BAŞARISIZ GÖNDERİM RAPORLARI**\n"]
-        for s_name, phone, _ in db_sessions:
+        for s_name, phone, _ in (db_sessions or []):
             fails = failed_reports_cache.get(s_name, [])
             report_lines.append(f"📱 `{phone}` -> Başarısız Grup Sayısı: {len(fails)}")
             if fails:
@@ -583,7 +615,7 @@ async def button(update, context):
         await q.edit_message_text("🚫 Bu hesabın mesaj atmayacağı grubun linkini veya kullanıcı adını gönderin:", reply_markup=sub_menu_keyboard())
     elif action.startswith("del_"):
         s_name = action.replace("del_", "")
-        db.delete_session_db(s_name)
+        await asyncio.to_thread(db.delete_session_db, s_name)
         await _safe_disconnect(clients.pop(s_name, None))
         await q.edit_message_text("✅ Hesap silindi.", reply_markup=get_keyboard(uid))
     elif action == "blacklist":
@@ -605,15 +637,18 @@ async def button(update, context):
         await admin_panel_refresh(q)
     elif action.startswith("rev_key_") and is_admin(uid):
         k_code = action.replace("rev_key_", "")
-        db.revoke_license(k_code)
-        await q.answer(f"🔑 Key iptal edildi: {k_code}", show_alert=True)
+        await asyncio.to_thread(db.revoke_license, k_code)
+        try:
+            await q.answer(f"🔑 Key iptal edildi: {k_code}", show_alert=True)
+        except Exception:
+            pass
         await admin_panel_refresh(q)
     elif action == "admin_broadcast" and is_admin(uid):
         context.user_data["flow"] = "admin_broadcast_msg"
         await q.edit_message_text("📢 Tüm kullanıcılara duyuru mesajını yazın:", reply_markup=admin_keyboard())
     elif action.startswith("approve_pay_") and is_admin(uid):
         target_uid = int(action.replace("approve_pay_", ""))
-        db.add_license_time_db(target_uid, 30)
+        await asyncio.to_thread(db.add_license_time_db, target_uid, 30)
         await q.edit_message_text("✅ Ödeme onaylandı.")
         try:
             await context.bot.send_message(chat_id=target_uid, text="🎉 Ödemeniz onaylandı!")
@@ -628,9 +663,9 @@ async def button(update, context):
             pass
 
 async def admin_panel_refresh(q):
-    rows = db.list_licenses()
+    rows = await asyncio.to_thread(db.list_licenses)
     kb_list = []
-    for r in rows:
+    for r in (rows or []):
         code = r['code']
         note = r.get('note', 'İsimsiz')
         status_icon = "🟢 Aktif" if not r['is_used'] else "🔴 Kullanıldı"
@@ -665,10 +700,10 @@ async def text_handler(update, context):
     if flow.startswith("acc_text_input_"):
         s_name = flow.replace("acc_text_input_", "")
         if text.lower() == "sil":
-            db.set_account_custom_text(s_name, "")
+            await asyncio.to_thread(db.set_account_custom_text, s_name, "")
             await update.effective_message.reply_text("✅ Özel metin kaldırıldı (Kayıtlı Mesajlara dönüldü).", reply_markup=get_keyboard(uid))
         else:
-            db.set_account_custom_text(s_name, clean_bold_stars(text))
+            await asyncio.to_thread(db.set_account_custom_text, s_name, clean_bold_stars(text))
             await update.effective_message.reply_text("✅ Özel reklam metni kaydedildi!", reply_markup=get_keyboard(uid))
         context.user_data.clear()
         return
@@ -677,7 +712,7 @@ async def text_handler(update, context):
         s_name = flow.replace("acc_times_delay_", "")
         try:
             val = int(text)
-            db.set_account_delay(s_name, val)
+            await asyncio.to_thread(db.set_account_delay, s_name, val)
             context.user_data["flow"] = f"acc_times_loop_{s_name}"
             await update.effective_message.reply_text("⏱ Şimdi bu hesap için **Tur Dinlenme Süresini (saniye)** yazın (Örn: `600`):", reply_markup=sub_menu_keyboard())
         except ValueError:
@@ -688,7 +723,7 @@ async def text_handler(update, context):
         s_name = flow.replace("acc_times_loop_", "")
         try:
             val = int(text)
-            db.set_account_loop(s_name, val)
+            await asyncio.to_thread(db.set_account_loop, s_name, val)
             context.user_data.clear()
             await update.effective_message.reply_text(f"✅ Tur dinlenme süresi {val} saniye olarak ayarlandı!", reply_markup=get_keyboard(uid))
         except ValueError:
@@ -704,7 +739,7 @@ async def text_handler(update, context):
             note = parts[0].strip()
             days = int(parts[1].strip())
             code = "FKD-" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-            db.create_license(code, days, note=note)
+            await asyncio.to_thread(db.create_license, code, days, note=note)
             context.user_data.clear()
             await update.effective_message.reply_text(f"✅ **KEY Üretildi:** `{code}` ({note} - {days} Gün)", parse_mode="Markdown", reply_markup=admin_keyboard())
         except ValueError:
@@ -712,7 +747,8 @@ async def text_handler(update, context):
         return
 
     if flow == "admin_broadcast_msg" and is_admin(uid):
-        for u_id in db.get_all_users():
+        users = await asyncio.to_thread(db.get_all_users)
+        for u_id in (users or []):
             try:
                 await context.bot.send_message(chat_id=u_id, text=f"📢 **DUYURU**\n\n{text}", parse_mode="Markdown")
             except Exception:
@@ -759,7 +795,7 @@ async def text_handler(update, context):
             username = me_user.username if me_user and me_user.username else ""
             await _safe_disconnect(item["client"])
             clients.pop(s_name, None)
-            db.save_session_db(uid, s_name, item["phone"], s_string, username=username)
+            await asyncio.to_thread(db.save_session_db, uid, s_name, item["phone"], s_string, username=username)
             pending.pop(uid, None)
             context.user_data.clear()
             await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
@@ -781,7 +817,7 @@ async def text_handler(update, context):
             username = me_user.username if me_user and me_user.username else ""
             await _safe_disconnect(item["client"])
             clients.pop(s_name, None)
-            db.save_session_db(uid, s_name, item["phone"], s_string, username=username)
+            await asyncio.to_thread(db.save_session_db, uid, s_name, item["phone"], s_string, username=username)
             pending.pop(uid, None)
             context.user_data.clear()
             await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
@@ -791,7 +827,7 @@ async def text_handler(update, context):
     elif flow.startswith("acc_blacklist_add_"):
         s_name = flow.replace("acc_blacklist_add_", "")
         target = text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
-        db.add_account_blacklist_db(s_name, target)
+        await asyncio.to_thread(db.add_account_blacklist_db, s_name, target)
         context.user_data.clear()
         await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
 
@@ -804,21 +840,30 @@ async def text_handler(update, context):
         await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
 
     elif flow == "redeem":
-        ok, msg = db.use_license(uid, text)
+        _, msg = await asyncio.to_thread(db.use_license, uid, text)
         context.user_data.clear()
         await update.effective_message.reply_text(msg, reply_markup=get_keyboard(uid))
 
 def main():
     db.init_db()
-    t = Thread(target=run_web)
-    t.daemon = True
-    t.start()
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    Thread(target=run_web, daemon=True).start()
+    Thread(target=_keep_alive_worker, daemon=True).start()
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .connect_timeout(15)
+        .read_timeout(20)
+        .write_timeout(20)
+        .pool_timeout(10)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, text_handler))
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, poll_interval=0.5, timeout=15)
 
 if __name__ == "__main__":
     main()
