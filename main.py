@@ -10,7 +10,13 @@ from threading import Thread
 from flask import Flask
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import (
+    SessionPasswordNeededError,
+    FloodWaitError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedError,
+    UserDeactivatedBanError,
+)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 import database as db
@@ -36,7 +42,7 @@ def _keep_alive_worker():
     while True:
         try:
             import time
-            time.sleep(240)  # Her 4 dakikada bir servisi sıcak tut
+            time.sleep(240)
             req = urllib.request.Request(target_url, method="GET")
             with urllib.request.urlopen(req, timeout=5) as _:
                 pass
@@ -68,9 +74,6 @@ def clean_bold_stars(raw_text: str) -> str:
     cleaned = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"\1", cleaned, flags=re.DOTALL)
     return cleaned
 
-# -----------------------------------------------------------------------------
-# ANA PANEL ARAYÜZÜ
-# -----------------------------------------------------------------------------
 def get_keyboard(uid):
     rows = [
         [InlineKeyboardButton("💎 ABONELİK & FİYATLAR", callback_data="pricing_panel")],
@@ -118,7 +121,6 @@ async def show_home(update, context):
     uid = update.effective_user.id
     username = update.effective_user.username
 
-    # Hızlı ilk yanıt için kullanıcı kaydını arka planda tetikleyip menüyü gecikmesiz basıyoruz
     asyncio.create_task(asyncio.to_thread(db.ensure_user, uid, username))
     expiry_str = await asyncio.to_thread(_format_expiry_text, uid)
 
@@ -161,8 +163,7 @@ async def show_guide(update, context):
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
-# --- PROFESYONEL REKLAM GÖNDERİM MOTORU (PREMIUM EMOJİ KORUMALI) ---
-async def start_sender(uid, chat_id, context, target_s_name=None):
+async def start_sender(uid, chat_id, context, target_s_name=None, force_restart=False):
     valid = await asyncio.to_thread(has_valid_access, uid)
     if not valid:
         return
@@ -170,7 +171,14 @@ async def start_sender(uid, chat_id, context, target_s_name=None):
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
     existing = tasks.get(task_key)
     if existing and not existing.done():
-        return
+        if not force_restart:
+            return
+        tasks.pop(task_key, None)
+        existing.cancel()
+        try:
+            await existing
+        except Exception:
+            pass
 
     if not target_s_name:
         await asyncio.to_thread(db.set_user, uid, is_running=1)
@@ -203,29 +211,41 @@ async def _ensure_client_connected(client, s_string, phone):
     if not client.is_connected():
         await asyncio.wait_for(client.connect(), timeout=20)
 
+    last_exc = None
     for _ in range(3):
         try:
-            me = await asyncio.wait_for(client.get_me(), timeout=12)
+            me = await asyncio.wait_for(client.get_me(), timeout=15)
             if me is not None:
                 return client
-        except Exception:
-            await asyncio.sleep(1)
+        except (AuthKeyUnregisteredError, UserDeactivatedError, UserDeactivatedBanError) as auth_err:
+            await _safe_disconnect(client)
+            raise RuntimeError(f"Oturum yetkisiz ({phone}): {auth_err}")
+        except Exception as exc:
+            last_exc = exc
+            await asyncio.sleep(1.5)
 
     try:
-        await asyncio.wait_for(client.get_messages("me", limit=1), timeout=12)
+        await asyncio.wait_for(client.get_messages("me", limit=1), timeout=15)
         return client
-    except Exception:
-        pass
+    except (AuthKeyUnregisteredError, UserDeactivatedError, UserDeactivatedBanError) as auth_err:
+        await _safe_disconnect(client)
+        raise RuntimeError(f"Oturum yetkisiz ({phone}): {auth_err}")
+    except Exception as exc:
+        last_exc = exc
 
     try:
-        authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=10)
+        authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=12)
         if authorized:
             return client
-    except Exception:
-        pass
+    except (AuthKeyUnregisteredError, UserDeactivatedError, UserDeactivatedBanError) as auth_err:
+        await _safe_disconnect(client)
+        raise RuntimeError(f"Oturum yetkisiz ({phone}): {auth_err}")
+    except Exception as exc:
+        last_exc = exc
 
+    # Ağ/zaman aşımı durumlarında oturumu hemen "yetkisiz" diye silmeden tekrar denemeye izin ver
     await _safe_disconnect(client)
-    raise RuntimeError(f"Oturum yetkisiz ({phone})")
+    raise RuntimeError(f"Geçici bağlantı/doğrulama zaman aşımı ({phone}): {last_exc}")
 
 async def _send_single_message(client, s_string, phone, group_id, ad_text, ad_entities):
     client = await _ensure_client_connected(client, s_string, phone)
@@ -349,9 +369,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 success_count, fail_count, skipped_count = 0, 0, 0
                 failed_group_list = []
 
-                group_interval = int(await asyncio.to_thread(db.get_account_delay, s_name) or 10)
-                loop_interval = int(await asyncio.to_thread(db.get_account_loop, s_name) or 300)
-
                 for group in groups:
                     if task_key not in tasks:
                         break
@@ -359,6 +376,9 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         u_chk2 = await asyncio.to_thread(db.get_user, uid)
                         if (u_chk2 or {}).get("is_running", 0) == 0:
                             break
+
+                    # Her gruptan önce güncel süreyi veritabanından oku
+                    group_interval = int(await asyncio.to_thread(db.get_account_delay, s_name) or 10)
 
                     g_id, g_title = str(group.id), getattr(group, 'title', 'Grup')
                     entity = getattr(group, 'entity', None)
@@ -399,6 +419,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         await _sleep_cancellable(group_interval, uid, task_key, target_s_name)
 
                 failed_reports_cache[s_name] = failed_group_list
+                loop_interval = int(await asyncio.to_thread(db.get_account_loop, s_name) or 300)
 
                 report_text = (
                     f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
@@ -475,7 +496,6 @@ async def resume_active_users_background(application):
 async def post_init(application):
     asyncio.create_task(resume_active_users_background(application))
 
-# --- CALLBACK VE ARAYÜZ YÖNETİMİ ---
 async def button(update, context):
     q = update.callback_query
     try:
@@ -573,7 +593,7 @@ async def button(update, context):
         await q.edit_message_text("📩 **HESABA ÖZEL METİN VE SÜRE YAPILANDIRMASI**\n\nİşlem yapmak istediğiniz hesabı seçin:", reply_markup=InlineKeyboardMarkup(rows))
     elif action.startswith("start_one_"):
         s_name = action.replace("start_one_", "")
-        await start_sender(uid, q.message.chat_id, context, target_s_name=s_name)
+        await start_sender(uid, q.message.chat_id, context, target_s_name=s_name, force_restart=True)
         await q.message.reply_text("▶ **Seçilen hesap için reklam başlatıldı! (Sürekli otomatik döngüde çalışacak)**")
     elif action.startswith("stop_one_"):
         s_name = action.replace("stop_one_", "")
@@ -730,6 +750,9 @@ async def text_handler(update, context):
             val = int(text)
             await asyncio.to_thread(db.set_account_loop, s_name, val)
             context.user_data.clear()
+            acc_task_key = f"{uid}_acc_{s_name}"
+            if acc_task_key in tasks and not tasks[acc_task_key].done():
+                await start_sender(uid, update.effective_message.chat_id, context, target_s_name=s_name, force_restart=True)
             await update.effective_message.reply_text(f"✅ Tur dinlenme süresi {val} saniye olarak ayarlandı!", reply_markup=get_keyboard(uid))
         except ValueError:
             await update.effective_message.reply_text("Lütfen geçerli bir sayı girin.")
