@@ -8,40 +8,49 @@ import psycopg2.extras
 # Global bağlantı havuzu (Her seferinde yeniden bağlanma gecikmesini ve havuz şişmesini önler)
 _db_pool = None
 
+
 def get_connection_pool():
     global _db_pool
     if _db_pool is None:
         raw_url = os.environ.get("DB_URL") or os.environ.get("DATABASE_URL") or ""
         clean_url = raw_url.strip().strip('"').strip("'").strip()
         # Min 1, Max 10 bağlantılık hızlı havuz ve UTF-8 karakter kodlaması garantisi
-        _db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, clean_url, options="-c client_encoding=UTF8")
+        _db_pool = psycopg2.pool.SimpleConnectionPool(
+            1, 10, clean_url, options="-c client_encoding=UTF8"
+        )
     return _db_pool
+
 
 def get_db():
     pool = get_connection_pool()
     return pool.getconn()
 
+
 def release_db(conn):
     try:
         pool = get_connection_pool()
         pool.putconn(conn)
-    except:
+    except Exception:
         pass
+
 
 def init_db():
     conn = get_db()
     try:
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users (
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS users (
                         uid BIGINT PRIMARY KEY,
                         username TEXT,
-                        interval_seconds INTEGER DEFAULT 3,
+                        interval_seconds INTEGER DEFAULT 15,
                         loop_interval_seconds INTEGER DEFAULT 240,
                         is_running INTEGER DEFAULT 0,
                         custom_ad_text TEXT DEFAULT ''
-                    )''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS sessions (
+                    )"""
+        )
+
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS sessions (
                         session_name TEXT PRIMARY KEY,
                         uid BIGINT,
                         phone TEXT,
@@ -49,40 +58,50 @@ def init_db():
                         username TEXT DEFAULT '',
                         custom_text TEXT DEFAULT '',
                         custom_entities TEXT DEFAULT '',
-                        delay_seconds INTEGER DEFAULT 3,
+                        delay_seconds INTEGER DEFAULT 15,
                         loop_seconds INTEGER DEFAULT 240,
                         is_running INTEGER DEFAULT 0
-                    )''')
-        
+                    )"""
+        )
+
         # Mevcut veritabanlarında eksik olabilecek kolonlar için güvenli migration (ALTER TABLE)
         try:
             c.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_running INTEGER DEFAULT 0;")
             c.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS custom_entities TEXT DEFAULT '';")
-        except:
+            c.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS delay_seconds INTEGER DEFAULT 15;")
+            c.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS loop_seconds INTEGER DEFAULT 240;")
+        except Exception:
             conn.rollback()
 
-        c.execute('''CREATE TABLE IF NOT EXISTS licenses (
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS licenses (
                         code TEXT PRIMARY KEY,
                         duration_days INTEGER,
                         is_used INTEGER DEFAULT 0,
                         used_by BIGINT DEFAULT 0,
                         status TEXT DEFAULT 'active',
                         note TEXT DEFAULT 'İsimsiz'
-                    )''')
-                    
-        c.execute('''CREATE TABLE IF NOT EXISTS user_licenses (
+                    )"""
+        )
+
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS user_licenses (
                         uid BIGINT PRIMARY KEY,
                         expires_at TIMESTAMP
-                    )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS account_blacklist (
+                    )"""
+        )
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS account_blacklist (
                         session_name TEXT,
                         group_id TEXT,
                         PRIMARY KEY (session_name, group_id)
-                    )''')
+                    )"""
+        )
         conn.commit()
         c.close()
     finally:
         release_db(conn)
+
 
 def ensure_user(uid, username):
     conn = get_db()
@@ -96,6 +115,7 @@ def ensure_user(uid, username):
     finally:
         release_db(conn)
 
+
 def get_user(uid):
     conn = get_db()
     try:
@@ -106,6 +126,7 @@ def get_user(uid):
         return dict(row) if row else {}
     finally:
         release_db(conn)
+
 
 def set_user(uid, **kwargs):
     conn = get_db()
@@ -118,31 +139,39 @@ def set_user(uid, **kwargs):
     finally:
         release_db(conn)
 
+
 def save_session_db(uid, session_name, phone, session_string, username=""):
     conn = get_db()
     try:
         c = conn.cursor()
-        c.execute("""
+        c.execute(
+            """
             INSERT INTO sessions (session_name, uid, phone, session_string, username) 
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (session_name) 
             DO UPDATE SET uid = EXCLUDED.uid, phone = EXCLUDED.phone, session_string = EXCLUDED.session_string, username = EXCLUDED.username
-        """, (session_name, uid, phone, session_string, username))
+        """,
+            (session_name, uid, phone, session_string, username),
+        )
         conn.commit()
         c.close()
     finally:
         release_db(conn)
 
+
 def get_user_sessions_db(uid):
     conn = get_db()
     try:
         c = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        c.execute("SELECT session_name, phone, session_string FROM sessions WHERE uid = %s", (uid,))
+        c.execute(
+            "SELECT session_name, phone, session_string FROM sessions WHERE uid = %s", (uid,)
+        )
         rows = c.fetchall()
         c.close()
         return [(row["session_name"], row["phone"], row["session_string"]) for row in rows]
     finally:
         release_db(conn)
+
 
 def get_account_username(session_name):
     conn = get_db()
@@ -155,6 +184,7 @@ def get_account_username(session_name):
     finally:
         release_db(conn)
 
+
 def delete_session_db(session_name):
     conn = get_db()
     try:
@@ -166,6 +196,7 @@ def delete_session_db(session_name):
     finally:
         release_db(conn)
 
+
 def set_account_custom_text(session_name, text):
     conn = get_db()
     try:
@@ -175,6 +206,7 @@ def set_account_custom_text(session_name, text):
         c.close()
     finally:
         release_db(conn)
+
 
 def get_account_custom_text(session_name):
     conn = get_db()
@@ -187,15 +219,20 @@ def get_account_custom_text(session_name):
     finally:
         release_db(conn)
 
+
 def set_account_custom_entities(session_name, entities):
     conn = get_db()
     try:
         c = conn.cursor()
-        c.execute("UPDATE sessions SET custom_entities = %s WHERE session_name = %s", (entities, session_name))
+        c.execute(
+            "UPDATE sessions SET custom_entities = %s WHERE session_name = %s",
+            (entities, session_name),
+        )
         conn.commit()
         c.close()
     finally:
         release_db(conn)
+
 
 def get_account_custom_entities(session_name):
     conn = get_db()
@@ -208,15 +245,21 @@ def get_account_custom_entities(session_name):
     finally:
         release_db(conn)
 
+
 def set_account_delay(session_name, delay):
+    clean_delay = max(0, int(delay))
     conn = get_db()
     try:
         c = conn.cursor()
-        c.execute("UPDATE sessions SET delay_seconds = %s WHERE session_name = %s", (delay, session_name))
+        c.execute(
+            "UPDATE sessions SET delay_seconds = %s WHERE session_name = %s",
+            (clean_delay, session_name),
+        )
         conn.commit()
         c.close()
     finally:
         release_db(conn)
+
 
 def get_account_delay(session_name):
     conn = get_db()
@@ -225,19 +268,27 @@ def get_account_delay(session_name):
         c.execute("SELECT delay_seconds FROM sessions WHERE session_name = %s", (session_name,))
         row = c.fetchone()
         c.close()
-        return row["delay_seconds"] if row and row["delay_seconds"] is not None else 3
+        if row and row["delay_seconds"] is not None:
+            return max(0, int(row["delay_seconds"]))
+        return None
     finally:
         release_db(conn)
 
+
 def set_account_loop(session_name, loop_seconds):
+    clean_loop = max(0, int(loop_seconds))
     conn = get_db()
     try:
         c = conn.cursor()
-        c.execute("UPDATE sessions SET loop_seconds = %s WHERE session_name = %s", (loop_seconds, session_name))
+        c.execute(
+            "UPDATE sessions SET loop_seconds = %s WHERE session_name = %s",
+            (clean_loop, session_name),
+        )
         conn.commit()
         c.close()
     finally:
         release_db(conn)
+
 
 def get_account_loop(session_name):
     conn = get_db()
@@ -246,22 +297,29 @@ def get_account_loop(session_name):
         c.execute("SELECT loop_seconds FROM sessions WHERE session_name = %s", (session_name,))
         row = c.fetchone()
         c.close()
-        return row["loop_seconds"] if row and row["loop_seconds"] is not None else 240
+        if row and row["loop_seconds"] is not None:
+            return max(0, int(row["loop_seconds"]))
+        return None
     finally:
         release_db(conn)
+
 
 def add_account_blacklist_db(session_name, group_id):
     conn = get_db()
     try:
         c = conn.cursor()
-        c.execute("""
+        c.execute(
+            """
             INSERT INTO account_blacklist (session_name, group_id) VALUES (%s, %s)
             ON CONFLICT (session_name, group_id) DO NOTHING
-        """, (session_name, group_id))
+        """,
+            (session_name, group_id),
+        )
         conn.commit()
         c.close()
     finally:
         release_db(conn)
+
 
 def get_account_blacklist_db(session_name):
     conn = get_db()
@@ -274,30 +332,38 @@ def get_account_blacklist_db(session_name):
     finally:
         release_db(conn)
 
+
 def create_license(code, days, note="İsimsiz"):
     conn = get_db()
     try:
         c = conn.cursor()
-        c.execute("""
+        c.execute(
+            """
             INSERT INTO licenses (code, duration_days, status, note) 
             VALUES (%s, %s, 'active', %s)
             ON CONFLICT (code) DO UPDATE SET duration_days = EXCLUDED.duration_days, status = 'active', note = EXCLUDED.note
-        """, (code, days, note))
+        """,
+            (code, days, note),
+        )
         conn.commit()
         c.close()
     finally:
         release_db(conn)
 
+
 def list_licenses():
     conn = get_db()
     try:
         c = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        c.execute("SELECT code, duration_days, is_used, used_by, status, note FROM licenses WHERE status != 'revoked'")
+        c.execute(
+            "SELECT code, duration_days, is_used, used_by, status, note FROM licenses WHERE status != 'revoked'"
+        )
         rows = c.fetchall()
         c.close()
         return [dict(r) for r in rows]
     finally:
         release_db(conn)
+
 
 def revoke_license(code):
     conn = get_db()
@@ -308,6 +374,7 @@ def revoke_license(code):
         c.close()
     finally:
         release_db(conn)
+
 
 def add_license_time_db(uid, days):
     conn = get_db()
@@ -323,20 +390,24 @@ def add_license_time_db(uid, days):
                     new_exp = current_exp + datetime.timedelta(days=days)
                 else:
                     new_exp = now + datetime.timedelta(days=days)
-            except:
+            except Exception:
                 new_exp = now + datetime.timedelta(days=days)
         else:
             new_exp = now + datetime.timedelta(days=days)
-        
-        c.execute("""
+
+        c.execute(
+            """
             INSERT INTO user_licenses (uid, expires_at) VALUES (%s, %s)
             ON CONFLICT (uid) DO UPDATE SET expires_at = EXCLUDED.expires_at
-        """, (uid, new_exp))
+        """,
+            (uid, new_exp),
+        )
         conn.commit()
         c.close()
         return new_exp
     finally:
         release_db(conn)
+
 
 def use_license(uid, code):
     conn = get_db()
@@ -347,19 +418,20 @@ def use_license(uid, code):
         if not row:
             c.close()
             return False, "❌ Böyle bir KEY bulunamadı!"
-        if row["is_used"] or row["status"] == 'revoked':
+        if row["is_used"] or row["status"] == "revoked":
             c.close()
             return False, "⚠️ Bu KEY daha önce kullanılmış veya iptal edilmiş!"
-        
+
         days = row["duration_days"]
         c.execute("UPDATE licenses SET is_used = 1, used_by = %s WHERE code = %s", (uid, code))
         conn.commit()
         c.close()
-        
+
         add_license_time_db(uid, days)
         return True, f"✅ KEY başarıyla aktif edildi! Hesabınıza {days} gün eklendi."
     finally:
         release_db(conn)
+
 
 def license_valid(uid, admin_id):
     if int(uid) == int(admin_id):
@@ -374,10 +446,11 @@ def license_valid(uid, admin_id):
             return False
         try:
             return datetime.datetime.now() < row["expires_at"]
-        except:
+        except Exception:
             return False
     finally:
         release_db(conn)
+
 
 def get_user_expiry(uid):
     conn = get_db()
@@ -390,6 +463,7 @@ def get_user_expiry(uid):
     finally:
         release_db(conn)
 
+
 def get_all_users():
     conn = get_db()
     try:
@@ -400,6 +474,7 @@ def get_all_users():
         return [r["uid"] for r in rows]
     finally:
         release_db(conn)
+
 
 def get_all_running_users():
     conn = get_db()
