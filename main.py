@@ -385,6 +385,20 @@ async def _get_effective_loop(uid: int, s_name: str) -> int:
     return max(0, int(u_info.get("loop_interval_seconds", 240) or 240))
 
 
+def _is_unauthorized_session_error(err: Exception) -> bool:
+    msg = str(err or "").lower()
+    return any(
+        token in msg
+        for token in (
+            "oturum yetkisiz",
+            "key is not registered",
+            "deleted/deactivated",
+            "user_deactivated",
+            "auth_key_unregistered",
+        )
+    )
+
+
 async def sender_loop(uid, context, chat_id, target_s_name=None):
     task_key = f"{uid}_auto_all_accounts" if not target_s_name else f"{uid}_acc_{target_s_name}"
     active_clients = {}
@@ -441,6 +455,13 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     log.error(f"Client bağlantı hatası ({phone}): {e}")
                     await _safe_disconnect(client)
                     active_clients.pop(s_name, None)
+                    clients.pop(s_name, None)
+                    if _is_unauthorized_session_error(e):
+                        try:
+                            await asyncio.to_thread(db.delete_session_db, s_name)
+                            log.warning(f"Geçersiz oturum veritabanından silindi: {s_name} ({phone})")
+                        except Exception as del_err:
+                            log.error(f"Geçersiz oturum silinemedi ({s_name}): {del_err}")
                     continue
 
                 custom_text = await asyncio.to_thread(db.get_account_custom_text, s_name)
