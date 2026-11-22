@@ -203,24 +203,29 @@ async def _ensure_client_connected(client, s_string, phone):
     if not client.is_connected():
         await asyncio.wait_for(client.connect(), timeout=20)
 
-    me = None
-    for _ in range(2):
+    for _ in range(3):
         try:
             me = await asyncio.wait_for(client.get_me(), timeout=12)
             if me is not None:
-                break
+                return client
         except Exception:
             await asyncio.sleep(1)
 
-    if me is None:
-        try:
-            authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=10)
-        except Exception:
-            authorized = False
-        if not authorized:
-            await _safe_disconnect(client)
-            raise RuntimeError(f"Oturum yetkisiz ({phone})")
-    return client
+    try:
+        await asyncio.wait_for(client.get_messages("me", limit=1), timeout=12)
+        return client
+    except Exception:
+        pass
+
+    try:
+        authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=10)
+        if authorized:
+            return client
+    except Exception:
+        pass
+
+    await _safe_disconnect(client)
+    raise RuntimeError(f"Oturum yetkisiz ({phone})")
 
 async def _send_single_message(client, s_string, phone, group_id, ad_text, ad_entities):
     client = await _ensure_client_connected(client, s_string, phone)
