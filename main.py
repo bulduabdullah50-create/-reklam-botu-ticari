@@ -224,12 +224,13 @@ async def start_sender(uid, chat_id, context, target_s_name=None, force_restart=
     if not valid:
         return
 
-    await _purge_user_stale_runs(uid, target_s_name=None if not target_s_name else target_s_name)
+    await _purge_user_stale_runs(uid, target_s_name=None)
 
     if not target_s_name:
         await asyncio.to_thread(db.set_user, uid, is_running=1)
         task_key = f"{uid}_auto_all_accounts"
     else:
+        await asyncio.to_thread(db.set_user, uid, is_running=0)
         task_key = f"{uid}_acc_{target_s_name}"
 
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
@@ -647,25 +648,10 @@ async def resume_active_users_background(application):
     try:
         running_users = await asyncio.to_thread(db.get_all_running_users)
         for uid in running_users or []:
-            valid = await asyncio.to_thread(db.license_valid, uid, ADMIN_ID)
-            if valid:
-                task_key = f"{uid}_auto_all_accounts"
-                existing = tasks.get(task_key)
-                if existing and not existing.done():
-                    continue
-                try:
-                    class DummyContext:
-                        def __init__(self, bot):
-                            self.bot = bot
-
-                    tasks[task_key] = asyncio.create_task(
-                        sender_loop(uid, DummyContext(application.bot), uid)
-                    )
-                    log.info(f"Kullanıcı {uid} otomatik olarak kaldığı yerden başlatıldı.")
-                except Exception as e:
-                    log.error(f"Kullanıcı {uid} başlatılamadı: {e}")
+            await asyncio.to_thread(db.set_user, uid, is_running=0)
+        log.info("Açılışta eski otomatik gönderim kuyruğu temizlendi; manuel başlatma bekleniyor.")
     except Exception as e:
-        log.error(f"Background resume hatası: {e}")
+        log.error(f"Background resume temizlik hatası: {e}")
 
 
 async def post_init(application):
