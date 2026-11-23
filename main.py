@@ -89,6 +89,26 @@ def clean_bold_stars(raw_text: str) -> str:
     return cleaned
 
 
+def _is_connection_drop_error(err: Exception) -> bool:
+    if isinstance(err, (ConnectionError, TimeoutError, OSError, asyncio.TimeoutError)):
+        return True
+    msg = str(err or "").lower()
+    return any(
+        token in msg
+        for token in (
+            "server closed the connection",
+            "connection closed",
+            "receiving data",
+            "disconnected",
+            "connection reset",
+            "broken pipe",
+            "timed out",
+            "timeout",
+            "cannot send requests while disconnected",
+        )
+    )
+
+
 def get_keyboard(uid):
     rows = [
         [InlineKeyboardButton("💎 ABONELİK & FİYATLAR", callback_data="pricing_panel")],
@@ -305,7 +325,12 @@ async def _ensure_client_connected(client, s_string, phone):
             raise
         except Exception as exc:
             last_exc = exc
-            await asyncio.sleep(0.5)
+            if not client.is_connected():
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=20)
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
 
     try:
         await asyncio.wait_for(client.get_messages("me", limit=1), timeout=15)
@@ -345,8 +370,13 @@ async def _send_single_message(client, s_string, phone, group_id, ad_text, ad_en
         return client
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except FloodWaitError:
+        raise
+    except Exception as exc:
+        if _is_connection_drop_error(exc):
+            log.warning(f"Bağlantı koptu ({phone}), yeniden bağlanıp aynı grupta devam ediliyor: {exc}")
         await _safe_disconnect(client)
+        await asyncio.sleep(2.0)
         client = await _ensure_client_connected(None, s_string, phone)
         await asyncio.wait_for(client.send_message(group_id, payload_text, **kwargs), timeout=20)
         return client
@@ -437,180 +467,209 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
             if task_key not in tasks:
                 break
 
-            db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
-            if target_s_name:
-                active_sessions = [
-                    (s[0], s[1], s[2])
-                    for s in (db_sessions or [])
-                    if s[0] == target_s_name and s[2] and len(s[2].strip()) > 20
-                ]
-            else:
-                active_sessions = [
-                    (s[0], s[1], s[2])
-                    for s in (db_sessions or [])
-                    if s[2] and len(s[2].strip()) > 20
-                ]
-
-            if not active_sessions:
-                await _sleep_exact_seconds(15, uid, task_key, target_s_name)
-                continue
-
-            tour_index += 1
-            log.info(f"[{task_key}] Tur #{tour_index} başladı | hesap sayısı: {len(active_sessions)}")
-
-            for s_name, phone, s_string in active_sessions:
-                if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
-                    raise asyncio.CancelledError()
-                if not target_s_name:
-                    u_chk = await asyncio.to_thread(db.get_user, uid)
-                    if (u_chk or {}).get("is_running", 0) == 0:
-                        raise asyncio.CancelledError()
-
-                client = active_clients.get(s_name)
-                try:
-                    client = await _ensure_client_connected(client, s_string, phone)
-                    active_clients[s_name] = client
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log.error(f"Client bağlantı hatası ({phone}): {e}")
-                    await _safe_disconnect(client)
-                    active_clients.pop(s_name, None)
-                    clients.pop(s_name, None)
-                    if _is_unauthorized_session_error(e):
-                        try:
-                            await asyncio.to_thread(db.delete_session_db, s_name)
-                            log.warning(f"Geçersiz oturum veritabanından silindi: {s_name} ({phone})")
-                        except Exception as del_err:
-                            log.error(f"Geçersiz oturum silinemedi ({s_name}): {del_err}")
-                    continue
-
-                custom_text = await asyncio.to_thread(db.get_account_custom_text, s_name)
-                ad_text = ""
-                ad_entities = None
-
-                if custom_text:
-                    ad_text = clean_bold_stars(custom_text)
+            try:
+                db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+                if target_s_name:
+                    active_sessions = [
+                        (s[0], s[1], s[2])
+                        for s in (db_sessions or [])
+                        if s[0] == target_s_name and s[2] and len(s[2].strip()) > 20
+                    ]
                 else:
-                    try:
-                        messages = await asyncio.wait_for(client.get_messages("me", limit=1), timeout=15)
-                        if messages and messages[0]:
-                            msg = messages[0]
-                            ad_text = getattr(msg, "text", "") or getattr(msg, "message", "")
-                            ad_entities = getattr(msg, "entities", None)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        log.warning(f"Kayıtlı mesaj alınamadı ({phone}): {e}")
+                    active_sessions = [
+                        (s[0], s[1], s[2])
+                        for s in (db_sessions or [])
+                        if s[2] and len(s[2].strip()) > 20
+                    ]
 
-                if not ad_text:
+                if not active_sessions:
+                    await _sleep_exact_seconds(15, uid, task_key, target_s_name)
                     continue
 
-                try:
-                    groups = []
-                    async for dialog in client.iter_dialogs():
-                        if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
-                            raise asyncio.CancelledError()
-                        if dialog.is_group or (dialog.is_channel and getattr(dialog.entity, "megagroup", False)):
-                            groups.append(dialog)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log.error(f"Grup listesi alınamadı ({phone}): {e}")
-                    await _safe_disconnect(client)
-                    active_clients.pop(s_name, None)
-                    continue
+                tour_index += 1
+                log.info(f"[{task_key}] Tur #{tour_index} başladı | hesap sayısı: {len(active_sessions)}")
 
-                if not groups:
-                    continue
-
-                user_bl = blacklisted_groups.get(uid, set())
-                acc_bl_raw = await asyncio.to_thread(db.get_account_blacklist_db, s_name)
-                acc_bl_ids = set(acc_bl_raw or [])
-                success_count, fail_count, skipped_count = 0, 0, 0
-                failed_group_list = []
-
-                for idx, group in enumerate(groups):
+                for s_name, phone, s_string in active_sessions:
                     if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                         raise asyncio.CancelledError()
                     if not target_s_name:
-                        u_chk2 = await asyncio.to_thread(db.get_user, uid)
-                        if (u_chk2 or {}).get("is_running", 0) == 0:
+                        u_chk = await asyncio.to_thread(db.get_user, uid)
+                        if (u_chk or {}).get("is_running", 0) == 0:
                             raise asyncio.CancelledError()
 
-                    g_id, g_title = str(group.id), getattr(group, "title", "Grup")
-                    entity = getattr(group, "entity", None)
-                    g_username = f"@{entity.username}".lower() if entity and getattr(entity, "username", None) else ""
+                    client = active_clients.get(s_name)
+                    try:
+                        client = await _ensure_client_connected(client, s_string, phone)
+                        active_clients[s_name] = client
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log.error(f"Client bağlantı hatası ({phone}): {e}")
+                        await _safe_disconnect(client)
+                        active_clients.pop(s_name, None)
+                        clients.pop(s_name, None)
+                        if _is_unauthorized_session_error(e):
+                            try:
+                                await asyncio.to_thread(db.delete_session_db, s_name)
+                                log.warning(f"Geçersiz oturum veritabanından silindi: {s_name} ({phone})")
+                            except Exception as del_err:
+                                log.error(f"Geçersiz oturum silinemedi ({s_name}): {del_err}")
+                        continue
 
-                    did_send = False
-                    if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl_ids:
-                        skipped_count += 1
+                    custom_text = await asyncio.to_thread(db.get_account_custom_text, s_name)
+                    ad_text = ""
+                    ad_entities = None
+
+                    if custom_text:
+                        ad_text = clean_bold_stars(custom_text)
                     else:
                         try:
-                            client = await _send_single_message(client, s_string, phone, group.id, ad_text, ad_entities)
-                            active_clients[s_name] = client
-                            success_count += 1
-                            did_send = True
+                            messages = await asyncio.wait_for(client.get_messages("me", limit=1), timeout=15)
+                            if messages and messages[0]:
+                                msg = messages[0]
+                                ad_text = getattr(msg, "text", "") or getattr(msg, "message", "")
+                                ad_entities = getattr(msg, "entities", None)
                         except asyncio.CancelledError:
                             raise
-                        except FloodWaitError as exc:
-                            log.warning(f"FloodWait ({phone}): {exc.seconds}s bekleniyor.")
-                            try:
-                                await context.bot.send_message(
-                                    chat_id=chat_id,
-                                    text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** {exc.seconds} saniye bekleme.",
-                                )
-                            except Exception:
-                                pass
+                        except Exception as e:
+                            log.warning(f"Kayıtlı mesaj alınamadı ({phone}): {e}")
 
-                            await _sleep_exact_seconds(exc.seconds, uid, task_key, target_s_name)
-                            try:
-                                client = await _send_single_message(
-                                    client, s_string, phone, group.id, ad_text, ad_entities
-                                )
-                                active_clients[s_name] = client
-                                success_count += 1
-                                did_send = True
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception:
-                                fail_count += 1
-                                failed_group_list.append(g_title)
-                        except Exception as exc:
-                            log.error(f"Mesaj gönderim hatası ({g_title}): {exc}")
-                            fail_count += 1
-                            failed_group_list.append(g_title)
+                    if not ad_text:
+                        continue
 
-                    group_interval = await _get_effective_delay(uid, s_name)
-                    log.info(f"[{phone}] Grup adımı bitti | beklenen süre: {group_interval}s | did_send={did_send}")
-                    if did_send and group_interval > 0 and idx < len(groups) - 1:
-                        await _sleep_exact_seconds(group_interval, uid, task_key, target_s_name)
+                    try:
+                        groups = []
+                        async for dialog in client.iter_dialogs():
+                            if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
+                                raise asyncio.CancelledError()
+                            if dialog.is_group or (dialog.is_channel and getattr(dialog.entity, "megagroup", False)):
+                                groups.append(dialog)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log.error(f"Grup listesi alınamadı ({phone}): {e}")
+                        await _safe_disconnect(client)
+                        active_clients.pop(s_name, None)
+                        continue
 
-                failed_reports_cache[s_name] = failed_group_list
-                loop_interval = await _get_effective_loop(uid, s_name)
+                    if not groups:
+                        continue
 
-                if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
-                    raise asyncio.CancelledError()
-                if not target_s_name:
-                    u_chk3 = await asyncio.to_thread(db.get_user, uid)
-                    if (u_chk3 or {}).get("is_running", 0) == 0:
+                    user_bl = blacklisted_groups.get(uid, set())
+                    acc_bl_raw = await asyncio.to_thread(db.get_account_blacklist_db, s_name)
+                    acc_bl_ids = set(acc_bl_raw or [])
+                    success_count, fail_count, skipped_count = 0, 0, 0
+                    failed_group_list = []
+
+                    for idx, group in enumerate(groups):
+                        if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
+                            raise asyncio.CancelledError()
+                        if not target_s_name:
+                            u_chk2 = await asyncio.to_thread(db.get_user, uid)
+                            if (u_chk2 or {}).get("is_running", 0) == 0:
+                                raise asyncio.CancelledError()
+
+                        g_id, g_title = str(group.id), getattr(group, "title", "Grup")
+                        entity = getattr(group, "entity", None)
+                        g_username = f"@{entity.username}".lower() if entity and getattr(entity, "username", None) else ""
+
+                        did_send = False
+                        if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl_ids:
+                            skipped_count += 1
+                        else:
+                            # FloodWait veya bağlantı kopması yaşanırsa aynı gruptan devam et
+                            while True:
+                                try:
+                                    client = await _send_single_message(
+                                        client, s_string, phone, group.id, ad_text, ad_entities
+                                    )
+                                    active_clients[s_name] = client
+                                    success_count += 1
+                                    did_send = True
+                                    break
+                                except asyncio.CancelledError:
+                                    raise
+                                except FloodWaitError as exc:
+                                    wait_sec = int(getattr(exc, "seconds", 30)) + 2
+                                    log.warning(f"FloodWait ({phone} - {g_title}): {wait_sec}s bekleniyor, sonra devam edilecek.")
+                                    try:
+                                        await context.bot.send_message(
+                                            chat_id=chat_id,
+                                            text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** {wait_sec} saniye bekleniyor, bitince kaldığı yerden devam edecek.",
+                                            parse_mode="Markdown",
+                                        )
+                                    except Exception:
+                                        pass
+                                    await _sleep_exact_seconds(wait_sec, uid, task_key, target_s_name)
+                                except Exception as exc:
+                                    if _is_connection_drop_error(exc):
+                                        log.warning(f"Bağlantı koptu ({phone} - {g_title}), yeniden bağlanıp tekrar deneniyor: {exc}")
+                                        await _safe_disconnect(client)
+                                        active_clients.pop(s_name, None)
+                                        await _sleep_exact_seconds(3, uid, task_key, target_s_name)
+                                        try:
+                                            client = await _ensure_client_connected(None, s_string, phone)
+                                            active_clients[s_name] = client
+                                            client = await _send_single_message(
+                                                client, s_string, phone, group.id, ad_text, ad_entities
+                                            )
+                                            active_clients[s_name] = client
+                                            success_count += 1
+                                            did_send = True
+                                            break
+                                        except asyncio.CancelledError:
+                                            raise
+                                        except FloodWaitError:
+                                            continue
+                                        except Exception as retry_exc:
+                                            log.error(f"Yeniden denemede mesaj hatası ({g_title}): {retry_exc}")
+                                            fail_count += 1
+                                            failed_group_list.append(g_title)
+                                            break
+                                    log.error(f"Mesaj gönderim hatası ({g_title}): {exc}")
+                                    fail_count += 1
+                                    failed_group_list.append(g_title)
+                                    break
+
+                        group_interval = await _get_effective_delay(uid, s_name)
+                        log.info(f"[{phone}] Grup adımı bitti | beklenen süre: {group_interval}s | did_send={did_send}")
+                        if did_send and group_interval > 0 and idx < len(groups) - 1:
+                            await _sleep_exact_seconds(group_interval, uid, task_key, target_s_name)
+
+                    failed_reports_cache[s_name] = failed_group_list
+                    loop_interval = await _get_effective_loop(uid, s_name)
+
+                    if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                         raise asyncio.CancelledError()
+                    if not target_s_name:
+                        u_chk3 = await asyncio.to_thread(db.get_user, uid)
+                        if (u_chk3 or {}).get("is_running", 0) == 0:
+                            raise asyncio.CancelledError()
 
-                report_text = (
-                    f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
-                    f"✅ Başarılı: {success_count} | ❌ Hatalı: {fail_count} | 🚫 Atlanan: {skipped_count}\n"
-                    f"⏳ *Sonraki tur {loop_interval} saniye sonra başlayacak.*"
-                )
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=report_text, parse_mode="Markdown")
-                except Exception:
-                    pass
+                    report_text = (
+                        f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
+                        f"✅ Başarılı: {success_count} | ❌ Hatalı: {fail_count} | 🚫 Atlanan: {skipped_count}\n"
+                        f"⏳ *Sonraki tur {loop_interval} saniye sonra başlayacak.*"
+                    )
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=report_text, parse_mode="Markdown")
+                    except Exception:
+                        pass
 
-                log.info(f"[{phone}] Tur #{tour_index} bitti | dinlenme: {loop_interval}s")
-                await _safe_disconnect(active_clients.pop(s_name, None))
-                if loop_interval > 0:
-                    await _sleep_exact_seconds(loop_interval, uid, task_key, target_s_name)
-                log.info(f"[{phone}] Tur dinlenmesi bitti, sonraki tura geçiliyor.")
+                    log.info(f"[{phone}] Tur #{tour_index} bitti | dinlenme: {loop_interval}s")
+                    await _safe_disconnect(active_clients.pop(s_name, None))
+                    if loop_interval > 0:
+                        await _sleep_exact_seconds(loop_interval, uid, task_key, target_s_name)
+                    log.info(f"[{phone}] Tur dinlenmesi bitti, sonraki tura geçiliyor.")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as tour_err:
+                log.exception("Tur içinde beklenmeyen hata, döngü kaldığı yerden sürdürülecek: %s", tour_err)
+                for _, c in list(active_clients.items()):
+                    await _safe_disconnect(c)
+                active_clients.clear()
+                await _sleep_exact_seconds(10, uid, task_key, target_s_name)
 
     except asyncio.CancelledError:
         pass
