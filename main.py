@@ -71,6 +71,7 @@ API_HASH = os.environ["API_HASH"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 clients, pending, tasks, blacklisted_groups, failed_reports_cache = {}, {}, {}, {}, {}
+_active_single_accounts: set[str] = set()
 
 
 def is_admin(uid):
@@ -87,6 +88,11 @@ def clean_bold_stars(raw_text: str) -> str:
     cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", raw_text, flags=re.DOTALL)
     cleaned = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"\1", cleaned, flags=re.DOTALL)
     return cleaned
+
+
+def _sanitize_notify_text(raw: str) -> str:
+    txt = str(raw or "").replace("`", "'").replace("*", "").replace("_", "-")
+    return txt[:600]
 
 
 def _is_connection_drop_error(err: Exception) -> bool:
@@ -107,6 +113,77 @@ def _is_connection_drop_error(err: Exception) -> bool:
             "cannot send requests while disconnected",
         )
     )
+
+
+def _set_single_account_state(s_name: str, active: bool):
+    if active:
+        _active_single_accounts.add(s_name)
+    else:
+        _active_single_accounts.discard(s_name)
+    for fn_name in ("set_account_running", "set_session_running"):
+        fn = getattr(db, fn_name, None)
+        if callable(fn):
+            try:
+                fn(s_name, 1 if active else 0)
+                return
+            except Exception:
+                pass
+
+
+def _get_running_single_accounts_for_user(uid: int) -> list[str]:
+    found = set()
+    for fn_name in ("get_running_sessions_db", "get_running_accounts_db", "get_active_sessions_db"):
+        fn = getattr(db, fn_name, None)
+        if callable(fn):
+            try:
+                rows = fn(uid) or []
+                for r in rows:
+                    if isinstance(r, (tuple, list)) and r:
+                        found.add(str(r[0]))
+                    elif isinstance(r, dict) and r.get("session_name"):
+                        found.add(str(r["session_name"]))
+                    elif isinstance(r, str):
+                        found.add(r)
+            except Exception:
+                pass
+    try:
+        user_sessions = db.get_user_sessions_db(uid) or []
+        for row in user_sessions:
+            s_name = str(row[0])
+            if s_name in _active_single_accounts:
+                found.add(s_name)
+            elif len(row) >= 4 and row[3] in (1, True, "1"):
+                found.add(s_name)
+    except Exception:
+        pass
+    return list(found)
+
+
+async def _notify_issue(context, chat_id, message: str):
+    if not context or not chat_id:
+        return
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=message[:3900])
+    except Exception:
+        pass
+
+
+async def _notify_error(
+    context,
+    chat_id,
+    stage: str,
+    exc: Exception,
+    action_note: str = "Reklama kaldığı yerden devam ediliyor.",
+):
+    err_type = type(exc).__name__ if exc else "Error"
+    err_detail = _sanitize_notify_text(exc)
+    msg = (
+        f"⚠️ ŞU SORUN ÇIKTI ({_sanitize_notify_text(stage)}):\n"
+        f"Hata: {err_type}\n"
+        f"Detay: {err_detail}\n"
+        f"Durum: {_sanitize_notify_text(action_note)}"
+    )
+    await _notify_issue(context, chat_id, msg)
 
 
 def get_keyboard(uid):
@@ -250,7 +327,8 @@ async def start_sender(uid, chat_id, context, target_s_name=None, force_restart=
         await asyncio.to_thread(db.set_user, uid, is_running=1)
         task_key = f"{uid}_auto_all_accounts"
     else:
-        await asyncio.to_thread(db.set_user, uid, is_running=0)
+        await asyncio.to_thread(db.set_user, uid, is_running=1)
+        await asyncio.to_thread(_set_single_account_state, target_s_name, True)
         task_key = f"{uid}_acc_{target_s_name}"
 
     tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
@@ -396,7 +474,7 @@ async def _sleep_exact_seconds(seconds, uid, task_key, target_s_name):
             raise asyncio.CancelledError()
 
         now_mono = time.monotonic()
-        if not target_s_name and (now_mono - last_running_check) >= 2.0:
+        if (now_mono - last_running_check) >= 2.0:
             last_running_check = now_mono
             u_info = await asyncio.to_thread(db.get_user, uid)
             is_still_running = (u_info or {}).get("is_running", 0) != 0
@@ -457,12 +535,16 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
             valid = await asyncio.to_thread(has_valid_access, uid)
             if not valid:
-                if not target_s_name:
-                    await asyncio.to_thread(db.set_user, uid, is_running=0)
+                await _notify_issue(
+                    context,
+                    chat_id,
+                    "⚠️ ŞU SORUN ÇIKTI (Lisans Kontrolü):\nHata: LicenseExpiredOrMissing\nDetay: Aktif lisans bulunamadi\nDurum: Reklam dongusu durduruldu.",
+                )
+                await asyncio.to_thread(db.set_user, uid, is_running=0)
                 break
 
             user_data = await asyncio.to_thread(db.get_user, uid)
-            if not target_s_name and (user_data or {}).get("is_running", 0) == 0:
+            if (user_data or {}).get("is_running", 0) == 0:
                 break
             if task_key not in tasks:
                 break
@@ -492,10 +574,9 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 for s_name, phone, s_string in active_sessions:
                     if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                         raise asyncio.CancelledError()
-                    if not target_s_name:
-                        u_chk = await asyncio.to_thread(db.get_user, uid)
-                        if (u_chk or {}).get("is_running", 0) == 0:
-                            raise asyncio.CancelledError()
+                    u_chk = await asyncio.to_thread(db.get_user, uid)
+                    if (u_chk or {}).get("is_running", 0) == 0:
+                        raise asyncio.CancelledError()
 
                     client = active_clients.get(s_name)
                     try:
@@ -509,11 +590,27 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         active_clients.pop(s_name, None)
                         clients.pop(s_name, None)
                         if _is_unauthorized_session_error(e):
+                            await asyncio.to_thread(_set_single_account_state, s_name, False)
                             try:
                                 await asyncio.to_thread(db.delete_session_db, s_name)
                                 log.warning(f"Geçersiz oturum veritabanından silindi: {s_name} ({phone})")
                             except Exception as del_err:
                                 log.error(f"Geçersiz oturum silinemedi ({s_name}): {del_err}")
+                            await _notify_error(
+                                context,
+                                chat_id,
+                                f"Oturum - {phone}",
+                                e,
+                                "Bu oturum devre disi birakildi, diger hesaplarla reklama devam ediliyor.",
+                            )
+                        else:
+                            await _notify_error(
+                                context,
+                                chat_id,
+                                f"Baglanti - {phone}",
+                                e,
+                                "Reklama kaldigi yerden devam ediliyor.",
+                            )
                         continue
 
                     custom_text = await asyncio.to_thread(db.get_account_custom_text, s_name)
@@ -533,8 +630,20 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             raise
                         except Exception as e:
                             log.warning(f"Kayıtlı mesaj alınamadı ({phone}): {e}")
+                            await _notify_error(
+                                context,
+                                chat_id,
+                                f"Kayitli Mesaj - {phone}",
+                                e,
+                                "Reklama kaldigi yerden devam ediliyor.",
+                            )
 
                     if not ad_text:
+                        await _notify_issue(
+                            context,
+                            chat_id,
+                            f"⚠️ ŞU SORUN ÇIKTI (Reklam Metni - {phone}):\nHata: MissingAdText\nDetay: Ozel metin veya kayitli mesaj bulunamadi\nDurum: Sonraki turda tekrar denenecek, reklama devam ediliyor.",
+                        )
                         continue
 
                     try:
@@ -550,6 +659,13 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         log.error(f"Grup listesi alınamadı ({phone}): {e}")
                         await _safe_disconnect(client)
                         active_clients.pop(s_name, None)
+                        await _notify_error(
+                            context,
+                            chat_id,
+                            f"Grup Listesi - {phone}",
+                            e,
+                            "Baglanti yenilenip reklama devam ediliyor.",
+                        )
                         continue
 
                     if not groups:
@@ -564,10 +680,9 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     for idx, group in enumerate(groups):
                         if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                             raise asyncio.CancelledError()
-                        if not target_s_name:
-                            u_chk2 = await asyncio.to_thread(db.get_user, uid)
-                            if (u_chk2 or {}).get("is_running", 0) == 0:
-                                raise asyncio.CancelledError()
+                        u_chk2 = await asyncio.to_thread(db.get_user, uid)
+                        if (u_chk2 or {}).get("is_running", 0) == 0:
+                            raise asyncio.CancelledError()
 
                         g_id, g_title = str(group.id), getattr(group, "title", "Grup")
                         entity = getattr(group, "entity", None)
@@ -592,18 +707,24 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                 except FloodWaitError as exc:
                                     wait_sec = int(getattr(exc, "seconds", 30)) + 2
                                     log.warning(f"FloodWait ({phone} - {g_title}): {wait_sec}s bekleniyor, sonra devam edilecek.")
-                                    try:
-                                        await context.bot.send_message(
-                                            chat_id=chat_id,
-                                            text=f"⚠️ **Akıllı Koruma Uyarısı ({phone}):** {wait_sec} saniye bekleniyor, bitince kaldığı yerden devam edecek.",
-                                            parse_mode="Markdown",
-                                        )
-                                    except Exception:
-                                        pass
+                                    await _notify_error(
+                                        context,
+                                        chat_id,
+                                        f"FloodWait - {phone} ({g_title})",
+                                        exc,
+                                        f"{wait_sec} saniye bekleniyor, bitince ayni gruptan reklama devam edecek.",
+                                    )
                                     await _sleep_exact_seconds(wait_sec, uid, task_key, target_s_name)
                                 except Exception as exc:
                                     if _is_connection_drop_error(exc):
                                         log.warning(f"Bağlantı koptu ({phone} - {g_title}), yeniden bağlanıp tekrar deneniyor: {exc}")
+                                        await _notify_error(
+                                            context,
+                                            chat_id,
+                                            f"Baglanti Kopmasi - {phone} ({g_title})",
+                                            exc,
+                                            "Yeniden baglanip kaldigi yerden reklama devam ediliyor.",
+                                        )
                                         await _safe_disconnect(client)
                                         active_clients.pop(s_name, None)
                                         await _sleep_exact_seconds(3, uid, task_key, target_s_name)
@@ -625,10 +746,24 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                             log.error(f"Yeniden denemede mesaj hatası ({g_title}): {retry_exc}")
                                             fail_count += 1
                                             failed_group_list.append(g_title)
+                                            await _notify_error(
+                                                context,
+                                                chat_id,
+                                                f"Gonderim Hatasi - {phone} ({g_title})",
+                                                retry_exc,
+                                                "Siradaki grupla reklama devam ediliyor.",
+                                            )
                                             break
                                     log.error(f"Mesaj gönderim hatası ({g_title}): {exc}")
                                     fail_count += 1
                                     failed_group_list.append(g_title)
+                                    await _notify_error(
+                                        context,
+                                        chat_id,
+                                        f"Mesaj Gonderimi - {phone} ({g_title})",
+                                        exc,
+                                        "Bu grup atlanip reklama devam ediliyor.",
+                                    )
                                     break
 
                         group_interval = await _get_effective_delay(uid, s_name)
@@ -641,10 +776,9 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
                     if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                         raise asyncio.CancelledError()
-                    if not target_s_name:
-                        u_chk3 = await asyncio.to_thread(db.get_user, uid)
-                        if (u_chk3 or {}).get("is_running", 0) == 0:
-                            raise asyncio.CancelledError()
+                    u_chk3 = await asyncio.to_thread(db.get_user, uid)
+                    if (u_chk3 or {}).get("is_running", 0) == 0:
+                        raise asyncio.CancelledError()
 
                     report_text = (
                         f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
@@ -669,12 +803,26 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 for _, c in list(active_clients.items()):
                     await _safe_disconnect(c)
                 active_clients.clear()
+                await _notify_error(
+                    context,
+                    chat_id,
+                    "Tur Dongusu",
+                    tour_err,
+                    "10 saniye sonra reklama kaldigi yerden devam edilecek.",
+                )
                 await _sleep_exact_seconds(10, uid, task_key, target_s_name)
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
         log.exception("Döngü kritik hata: %s", e)
+        await _notify_error(
+            context,
+            chat_id,
+            "Ana Dongu",
+            e,
+            "Dongu sonlandi veya yeniden baslatilacak.",
+        )
     finally:
         for _, c in list(active_clients.items()):
             await _safe_disconnect(c)
@@ -686,8 +834,15 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 async def stop_sender(uid, chat_id, context, target_s_name=None):
     if not target_s_name:
         await asyncio.to_thread(db.set_user, uid, is_running=0)
+        try:
+            user_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+            for s_name, _, _ in user_sessions or []:
+                await asyncio.to_thread(_set_single_account_state, str(s_name), False)
+        except Exception:
+            pass
         keys_to_stop = [k for k in list(tasks.keys()) if k.startswith(f"{uid}_")]
     else:
+        await asyncio.to_thread(_set_single_account_state, target_s_name, False)
         keys_to_stop = [f"{uid}_acc_{target_s_name}"]
 
     for key in keys_to_stop:
@@ -708,10 +863,34 @@ async def resume_active_users_background(application):
     try:
         running_users = await asyncio.to_thread(db.get_all_running_users)
         for uid in running_users or []:
-            await asyncio.to_thread(db.set_user, uid, is_running=0)
-        log.info("Açılışta eski otomatik gönderim kuyruğu temizlendi; manuel başlatma bekleniyor.")
+            valid = await asyncio.to_thread(has_valid_access, uid)
+            if not valid:
+                await asyncio.to_thread(db.set_user, uid, is_running=0)
+                continue
+
+            single_accs = await asyncio.to_thread(_get_running_single_accounts_for_user, uid)
+            if single_accs:
+                for s_name in single_accs:
+                    task_key = f"{uid}_acc_{s_name}"
+                    if task_key not in tasks or tasks[task_key].done():
+                        tasks[task_key] = asyncio.create_task(sender_loop(uid, application, uid, s_name))
+                        await _notify_issue(
+                            application,
+                            uid,
+                            f"🔄 Otomatik Devam ({s_name}): Sunucu yeniden baslatildi, tek hesap reklama kaldigi yerden devam ediyor.",
+                        )
+            else:
+                task_key = f"{uid}_auto_all_accounts"
+                if task_key not in tasks or tasks[task_key].done():
+                    tasks[task_key] = asyncio.create_task(sender_loop(uid, application, uid, None))
+                    await _notify_issue(
+                        application,
+                        uid,
+                        "🔄 Otomatik Devam: Sunucu yeniden baslatildi, reklam dongusu kaldigi yerden devam ediyor.",
+                    )
+        log.info("Açılışta aktif kullanıcı ve tek hesap görevleri için otomatik devam kontrolü tamamlandı.")
     except Exception as e:
-        log.error(f"Background resume temizlik hatası: {e}")
+        log.error(f"Background resume hatası: {e}")
 
 
 async def post_init(application):
@@ -918,6 +1097,7 @@ async def button(update, context):
         )
     elif action.startswith("del_"):
         s_name = action.replace("del_", "")
+        await asyncio.to_thread(_set_single_account_state, s_name, False)
         await _cancel_task_immediately(f"{uid}_acc_{s_name}")
         await asyncio.to_thread(db.delete_session_db, s_name)
         await _safe_disconnect(clients.pop(s_name, None))
