@@ -17,6 +17,7 @@ from telethon.errors import (
     AuthKeyUnregisteredError,
     UserDeactivatedError,
     UserDeactivatedBanError,
+    ChatWriteForbiddenError,
 )
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -64,6 +65,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("farketmezda")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telethon.network.mtprotosender").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -71,7 +73,10 @@ API_HASH = os.environ["API_HASH"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 clients, pending, tasks, blacklisted_groups, failed_reports_cache = {}, {}, {}, {}, {}
+# s_name -> {group_id_str: {"title": str, "reason": str}}
+restricted_groups_by_account: dict[str, dict[str, dict[str, str]]] = {}
 _active_single_accounts: set[str] = set()
+_explicitly_stopped_users: set[int] = set()
 
 
 def is_admin(uid):
@@ -113,6 +118,39 @@ def _is_connection_drop_error(err: Exception) -> bool:
             "cannot send requests while disconnected",
         )
     )
+
+
+def _is_write_restricted_error(err: Exception) -> bool:
+    if isinstance(err, ChatWriteForbiddenError):
+        return True
+    msg = str(err or "").lower()
+    return any(
+        token in msg
+        for token in (
+            "chatwriteforbidden",
+            "you can't write in this chat",
+            "write is forbidden",
+            "user is banned in the channel",
+            "chat_send_plain_forbidden",
+            "chat_guest_send_forbidden",
+            "channel_private",
+        )
+    )
+
+
+def _add_restricted_group(s_name: str, group_id: str, title: str, reason: str):
+    acc_map = restricted_groups_by_account.setdefault(s_name, {})
+    acc_map[str(group_id)] = {
+        "title": title or str(group_id),
+        "reason": _sanitize_notify_text(reason),
+    }
+
+
+def _remove_restricted_group(s_name: str, group_id: str) -> bool:
+    acc_map = restricted_groups_by_account.get(s_name)
+    if not acc_map:
+        return False
+    return acc_map.pop(str(group_id), None) is not None
 
 
 def _set_single_account_state(s_name: str, active: bool):
@@ -195,6 +233,7 @@ def get_keyboard(uid):
         ],
         [InlineKeyboardButton("▶️ Başlat / ⏹ Durdur", callback_data="start_stop_menu")],
         [InlineKeyboardButton("📩 Hesaba Özel Metin & Süreler", callback_data="account_config_menu")],
+        [InlineKeyboardButton("🚧 Yazılamayan / Muteli Gruplar", callback_data="restricted_groups_menu")],
         [InlineKeyboardButton("📊 Başarısız Raporlar", callback_data="failed_reports")],
         [InlineKeyboardButton("📖 Kurulum & Ödeme Rehberi", callback_data="guide_menu")],
         [
@@ -273,6 +312,41 @@ async def start(update, context):
     await show_home(update, context)
 
 
+async def unmute_group_command(update, context):
+    """Kullanım: /unmute_group <grup_id veya grup_adı>"""
+    uid = update.effective_user.id
+    args = context.args or []
+    query_txt = " ".join(args).strip().lower()
+    db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
+    s_names = [str(row[0]) for row in db_sessions]
+
+    if not query_txt:
+        await update.effective_message.reply_text(
+            "ℹ️ Mute/engel kaldırmak için komutla birlikte grup ID veya grup adını yazın.\n"
+            "Örnek: `/unmute_group -1001234567890` veya `/unmute_group Arayış Grubu`\n"
+            "Dilerseniz ana menüdeki **🚧 Yazılamayan / Muteli Gruplar** butonundan tek tek açabilirsiniz.",
+            parse_mode="Markdown",
+        )
+        return
+
+    removed_items = []
+    for s_name in s_names:
+        acc_map = restricted_groups_by_account.get(s_name, {})
+        for g_id, info in list(acc_map.items()):
+            title_low = str(info.get("title", "")).lower()
+            if query_txt == g_id.lower() or query_txt in title_low:
+                _remove_restricted_group(s_name, g_id)
+                removed_items.append(f"{info.get('title', g_id)} (`{g_id}`)")
+
+    if removed_items:
+        await update.effective_message.reply_text(
+            "✅ **Mute/kısıt kaldırıldı, reklam listesine geri eklendi:**\n• " + "\n• ".join(removed_items[:15]),
+            parse_mode="Markdown",
+        )
+    else:
+        await update.effective_message.reply_text("⚠️ Yazılamayan gruplar listesinde eşleşen bir grup bulunamadı.")
+
+
 async def show_guide(update, context):
     q = update.callback_query
     guide_text = (
@@ -286,7 +360,8 @@ async def show_guide(update, context):
         "• **Adım 2:** \"Hesaplarım\" menüsünden Telegram hesaplarınızı bağlayın.\n"
         "• **Adım 3:** Her hesaba özel **reklam metninizi** ister Kayıtlı Mesajlar'dan ister panelden ayarlayın.\n"
         "• **Adım 4:** Grup arası bekleme sürelerini ve tur dinlenme aralıklarını yapılandırın.\n"
-        "• **Adım 5:** Ana paneldeki **Başlat/Durdur** butonlarıyla reklam akışını yönetin!"
+        "• **Adım 5:** Ana paneldeki **Başlat/Durdur** butonlarıyla reklam akışını yönetin!\n"
+        "• **Adım 6:** Muteli/yazılamayan grupları **Yazılamayan / Muteli Gruplar** menüsünden veya `/unmute_group` ile açabilirsiniz!"
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
@@ -321,13 +396,13 @@ async def start_sender(uid, chat_id, context, target_s_name=None, force_restart=
     if not valid:
         return
 
+    _explicitly_stopped_users.discard(int(uid))
     await _purge_user_stale_runs(uid, target_s_name=None)
 
+    await asyncio.to_thread(db.set_user, uid, is_running=1)
     if not target_s_name:
-        await asyncio.to_thread(db.set_user, uid, is_running=1)
         task_key = f"{uid}_auto_all_accounts"
     else:
-        await asyncio.to_thread(db.set_user, uid, is_running=1)
         await asyncio.to_thread(_set_single_account_state, target_s_name, True)
         task_key = f"{uid}_acc_{target_s_name}"
 
@@ -343,7 +418,7 @@ async def _build_telethon_client(s_string):
         connection_retries=4,
         retry_delay=2,
         auto_reconnect=False,
-        timeout=25,
+        timeout=20,
     )
 
 
@@ -444,19 +519,21 @@ async def _send_single_message(client, s_string, phone, group_id, ad_text, ad_en
     payload_text = ad_text if ad_entities else clean_bold_stars(ad_text)
     kwargs = {"formatting_entities": ad_entities, "parse_mode": None} if ad_entities else {"parse_mode": None}
     try:
-        await asyncio.wait_for(client.send_message(group_id, payload_text, **kwargs), timeout=20)
+        await asyncio.wait_for(client.send_message(group_id, payload_text, **kwargs), timeout=12)
         return client
     except asyncio.CancelledError:
         raise
-    except FloodWaitError:
+    except (FloodWaitError, ChatWriteForbiddenError):
         raise
     except Exception as exc:
+        if _is_write_restricted_error(exc):
+            raise
         if _is_connection_drop_error(exc):
             log.warning(f"Bağlantı koptu ({phone}), yeniden bağlanıp aynı grupta devam ediliyor: {exc}")
         await _safe_disconnect(client)
         await asyncio.sleep(2.0)
         client = await _ensure_client_connected(None, s_string, phone)
-        await asyncio.wait_for(client.send_message(group_id, payload_text, **kwargs), timeout=20)
+        await asyncio.wait_for(client.send_message(group_id, payload_text, **kwargs), timeout=12)
         return client
 
 
@@ -470,6 +547,8 @@ async def _sleep_exact_seconds(seconds, uid, task_key, target_s_name):
     is_still_running = True
 
     while True:
+        if int(uid) in _explicitly_stopped_users:
+            raise asyncio.CancelledError()
         if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
             raise asyncio.CancelledError()
 
@@ -530,6 +609,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
     try:
         while True:
+            if int(uid) in _explicitly_stopped_users:
+                break
             if tasks.get(task_key) is not asyncio.current_task():
                 break
 
@@ -538,10 +619,10 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 await _notify_issue(
                     context,
                     chat_id,
-                    "⚠️ ŞU SORUN ÇIKTI (Lisans Kontrolü):\nHata: LicenseExpiredOrMissing\nDetay: Aktif lisans bulunamadi\nDurum: Reklam dongusu durduruldu.",
+                    "⚠️ ŞU SORUN ÇIKTI (Lisans Kontrolü):\nHata: LicenseExpiredOrMissing\nDetay: Aktif lisans bulunamadi\nDurum: 15 saniye sonra tekrar kontrol edilecek, sistem kapanmiyor.",
                 )
-                await asyncio.to_thread(db.set_user, uid, is_running=0)
-                break
+                await _sleep_exact_seconds(15, uid, task_key, target_s_name)
+                continue
 
             user_data = await asyncio.to_thread(db.get_user, uid)
             if (user_data or {}).get("is_running", 0) == 0:
@@ -572,6 +653,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                 log.info(f"[{task_key}] Tur #{tour_index} başladı | hesap sayısı: {len(active_sessions)}")
 
                 for s_name, phone, s_string in active_sessions:
+                    if int(uid) in _explicitly_stopped_users:
+                        raise asyncio.CancelledError()
                     if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                         raise asyncio.CancelledError()
                     u_chk = await asyncio.to_thread(db.get_user, uid)
@@ -649,6 +732,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     try:
                         groups = []
                         async for dialog in client.iter_dialogs():
+                            if int(uid) in _explicitly_stopped_users:
+                                raise asyncio.CancelledError()
                             if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                                 raise asyncio.CancelledError()
                             if dialog.is_group or (dialog.is_channel and getattr(dialog.entity, "megagroup", False)):
@@ -674,10 +759,13 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     user_bl = blacklisted_groups.get(uid, set())
                     acc_bl_raw = await asyncio.to_thread(db.get_account_blacklist_db, s_name)
                     acc_bl_ids = set(acc_bl_raw or [])
+                    acc_restricted = restricted_groups_by_account.get(s_name, {})
                     success_count, fail_count, skipped_count = 0, 0, 0
                     failed_group_list = []
 
                     for idx, group in enumerate(groups):
+                        if int(uid) in _explicitly_stopped_users:
+                            raise asyncio.CancelledError()
                         if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                             raise asyncio.CancelledError()
                         u_chk2 = await asyncio.to_thread(db.get_user, uid)
@@ -689,10 +777,14 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         g_username = f"@{entity.username}".lower() if entity and getattr(entity, "username", None) else ""
 
                         did_send = False
-                        if g_id in user_bl or (g_username and g_username in user_bl) or g_id in acc_bl_ids:
+                        if (
+                            g_id in user_bl
+                            or (g_username and g_username in user_bl)
+                            or g_id in acc_bl_ids
+                            or g_id in acc_restricted
+                        ):
                             skipped_count += 1
                         else:
-                            # FloodWait veya bağlantı kopması yaşanırsa aynı gruptan devam et
                             while True:
                                 try:
                                     client = await _send_single_message(
@@ -716,6 +808,18 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                     )
                                     await _sleep_exact_seconds(wait_sec, uid, task_key, target_s_name)
                                 except Exception as exc:
+                                    if _is_write_restricted_error(exc):
+                                        _add_restricted_group(s_name, g_id, g_title, str(exc))
+                                        fail_count += 1
+                                        failed_group_list.append(g_title)
+                                        await _notify_error(
+                                            context,
+                                            chat_id,
+                                            f"Yazma Kisiti / Mute - {phone} ({g_title})",
+                                            exc,
+                                            "Grup 'Yazilamayan / Muteli Gruplar' listesine alindi. Kurucu muteyi acinca listeden cikarip tekrar reklam atabilirsiniz.",
+                                        )
+                                        break
                                     if _is_connection_drop_error(exc):
                                         log.warning(f"Bağlantı koptu ({phone} - {g_title}), yeniden bağlanıp tekrar deneniyor: {exc}")
                                         await _notify_error(
@@ -743,6 +847,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                         except FloodWaitError:
                                             continue
                                         except Exception as retry_exc:
+                                            if _is_write_restricted_error(retry_exc):
+                                                _add_restricted_group(s_name, g_id, g_title, str(retry_exc))
                                             log.error(f"Yeniden denemede mesaj hatası ({g_title}): {retry_exc}")
                                             fail_count += 1
                                             failed_group_list.append(g_title)
@@ -774,6 +880,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     failed_reports_cache[s_name] = failed_group_list
                     loop_interval = await _get_effective_loop(uid, s_name)
 
+                    if int(uid) in _explicitly_stopped_users:
+                        raise asyncio.CancelledError()
                     if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
                         raise asyncio.CancelledError()
                     u_chk3 = await asyncio.to_thread(db.get_user, uid)
@@ -808,21 +916,24 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     chat_id,
                     "Tur Dongusu",
                     tour_err,
-                    "10 saniye sonra reklama kaldigi yerden devam edilecek.",
+                    "10 saniye sonra reklama kaldigi yerden devam edilecek (sistem kapanmiyor).",
                 )
-                await _sleep_exact_seconds(10, uid, task_key, target_s_name)
+                await asyncio.sleep(10)
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        log.exception("Döngü kritik hata: %s", e)
+        log.exception("Döngü kritik hata, yeniden başlatılıyor: %s", e)
         await _notify_error(
             context,
             chat_id,
             "Ana Dongu",
             e,
-            "Dongu sonlandi veya yeniden baslatilacak.",
+            "10 saniye sonra dongu yeniden baslatilacak, durmayacak.",
         )
+        await asyncio.sleep(10)
+        if int(uid) not in _explicitly_stopped_users and tasks.get(task_key) is asyncio.current_task():
+            tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
     finally:
         for _, c in list(active_clients.items()):
             await _safe_disconnect(c)
@@ -832,6 +943,7 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
 
 
 async def stop_sender(uid, chat_id, context, target_s_name=None):
+    _explicitly_stopped_users.add(int(uid))
     if not target_s_name:
         await asyncio.to_thread(db.set_user, uid, is_running=0)
         try:
@@ -844,6 +956,9 @@ async def stop_sender(uid, chat_id, context, target_s_name=None):
     else:
         await asyncio.to_thread(_set_single_account_state, target_s_name, False)
         keys_to_stop = [f"{uid}_acc_{target_s_name}"]
+        remaining_running = await asyncio.to_thread(_get_running_single_accounts_for_user, uid)
+        if not remaining_running and f"{uid}_auto_all_accounts" not in tasks:
+            await asyncio.to_thread(db.set_user, uid, is_running=0)
 
     for key in keys_to_stop:
         await _cancel_task_immediately(key)
@@ -859,38 +974,10 @@ async def stop_sender(uid, chat_id, context, target_s_name=None):
 
 
 async def resume_active_users_background(application):
-    await asyncio.sleep(3)
-    try:
-        running_users = await asyncio.to_thread(db.get_all_running_users)
-        for uid in running_users or []:
-            valid = await asyncio.to_thread(has_valid_access, uid)
-            if not valid:
-                await asyncio.to_thread(db.set_user, uid, is_running=0)
-                continue
-
-            single_accs = await asyncio.to_thread(_get_running_single_accounts_for_user, uid)
-            if single_accs:
-                for s_name in single_accs:
-                    task_key = f"{uid}_acc_{s_name}"
-                    if task_key not in tasks or tasks[task_key].done():
-                        tasks[task_key] = asyncio.create_task(sender_loop(uid, application, uid, s_name))
-                        await _notify_issue(
-                            application,
-                            uid,
-                            f"🔄 Otomatik Devam ({s_name}): Sunucu yeniden baslatildi, tek hesap reklama kaldigi yerden devam ediyor.",
-                        )
-            else:
-                task_key = f"{uid}_auto_all_accounts"
-                if task_key not in tasks or tasks[task_key].done():
-                    tasks[task_key] = asyncio.create_task(sender_loop(uid, application, uid, None))
-                    await _notify_issue(
-                        application,
-                        uid,
-                        "🔄 Otomatik Devam: Sunucu yeniden baslatildi, reklam dongusu kaldigi yerden devam ediyor.",
-                    )
-        log.info("Açılışta aktif kullanıcı ve tek hesap görevleri için otomatik devam kontrolü tamamlandı.")
-    except Exception as e:
-        log.error(f"Background resume hatası: {e}")
+    # Kullanıcı tarafından açıkça 'Başlat' komutu/butonu verilmeden otomatik başlatma yapılmaz.
+    # Durdurulmuş veya başlatılmamış hesaplar deploy sonrasında kendi kendine başlamaz;
+    # yalnızca kullanıcı 'Başlat' dediğinde akış kaldığı yerden başlar.
+    log.info("Açılışta otomatik başlatma kapalı: yalnızca kullanıcı Başlat komutu/butonu verdiğinde çalışacak.")
 
 
 async def post_init(application):
@@ -906,6 +993,37 @@ async def _restart_running_account_task_if_active(uid: int, s_name: str, chat_id
         await start_sender(uid, chat_id, context, target_s_name=None, force_restart=True)
 
 
+async def _render_restricted_groups_menu(q, uid: int):
+    db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
+    rows = []
+    lines = ["🚧 **YAZILAMAYAN / MUTELİ GRUPLAR LİSTESİ**\n"]
+    total_found = 0
+
+    for s_name, phone, _ in db_sessions:
+        acc_map = restricted_groups_by_account.get(s_name, {})
+        if not acc_map:
+            continue
+        lines.append(f"📱 `{phone}`:")
+        for g_id, info in list(acc_map.items())[:15]:
+            total_found += 1
+            g_title = info.get("title", g_id)
+            lines.append(f"  • {g_title} (`{g_id}`)")
+            rows.append([
+                InlineKeyboardButton(
+                    f"✅ Muteyi Aç / Tekrar Dene: {g_title[:24]}",
+                    callback_data=f"unmute_grp_{s_name}_{g_id}",
+                )
+            ])
+
+    if total_found == 0:
+        lines.append("Şu an yazılamayan/muteli listesinde bekleyen grup yok.")
+    else:
+        lines.append("\nKurucu muteyi kaldırdıktan sonra ilgili butona basarak grubu tekrar reklam listesine alabilirsin.")
+
+    rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+    await q.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+
+
 async def button(update, context):
     q = update.callback_query
     try:
@@ -919,6 +1037,19 @@ async def button(update, context):
         await show_home(update, context)
     elif action == "guide_menu":
         await show_guide(update, context)
+    elif action == "restricted_groups_menu":
+        await _render_restricted_groups_menu(q, uid)
+    elif action.startswith("unmute_grp_"):
+        payload = action.replace("unmute_grp_", "", 1)
+        if "_" in payload:
+            s_name, g_id = payload.rsplit("_", 1)
+            ok = _remove_restricted_group(s_name, g_id)
+            if ok:
+                try:
+                    await q.answer("✅ Grup listeden çıkarıldı, tekrar reklam atılacak!", show_alert=False)
+                except Exception:
+                    pass
+        await _render_restricted_groups_menu(q, uid)
     elif action == "pricing_panel":
         text = (
             "💎 **ABONELİK VE FİYAT LİSTESİ**\n"
@@ -1001,6 +1132,7 @@ async def button(update, context):
             ],
             [InlineKeyboardButton("✍️ Bu Hesaba Özel Metin Gir", callback_data=f"set_acc_text_{s_name}")],
             [InlineKeyboardButton("⏱ Süreleri Ayarla", callback_data=f"set_acc_times_{s_name}")],
+            [InlineKeyboardButton("🚧 Yazılamayan / Muteli Gruplar", callback_data="restricted_groups_menu")],
             [InlineKeyboardButton("🚫 Gruba Özel Engel", callback_data=f"acc_bl_{s_name}")],
             [InlineKeyboardButton("❌ Hesabı Sil", callback_data=f"del_{s_name}")],
             [InlineKeyboardButton("⬅ Geri", callback_data="accounts")],
@@ -1084,7 +1216,8 @@ async def button(update, context):
         report_lines = ["📊 **BAŞARISIZ GÖNDERİM RAPORLARI**\n"]
         for s_name, phone, _ in db_sessions or []:
             fails = failed_reports_cache.get(s_name, [])
-            report_lines.append(f"📱 `{phone}` -> Başarısız Grup Sayısı: {len(fails)}")
+            muted_cnt = len(restricted_groups_by_account.get(s_name, {}))
+            report_lines.append(f"📱 `{phone}` -> Başarısız Grup: {len(fails)} | Muteli/Yazılamayan: {muted_cnt}")
             if fails:
                 report_lines.append(f"  • Hata Alınanlar: {', '.join(fails[:5])}")
         await q.edit_message_text("\n".join(report_lines), parse_mode="Markdown", reply_markup=sub_menu_keyboard())
@@ -1097,6 +1230,7 @@ async def button(update, context):
         )
     elif action.startswith("del_"):
         s_name = action.replace("del_", "")
+        restricted_groups_by_account.pop(s_name, None)
         await asyncio.to_thread(_set_single_account_state, s_name, False)
         await _cancel_task_immediately(f"{uid}_acc_{s_name}")
         await asyncio.to_thread(db.delete_session_db, s_name)
@@ -1388,6 +1522,7 @@ def main():
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("unmute_group", unmute_group_command))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, text_handler))
