@@ -66,6 +66,7 @@ log = logging.getLogger("farketmezda")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telethon.network.mtprotosender").setLevel(logging.WARNING)
+logging.getLogger("telethon.client.updates").setLevel(logging.ERROR)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -362,7 +363,7 @@ async def _cancel_task_immediately(task_key: str):
     if task and not task.done():
         task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2.5)
         except Exception:
             pass
 
@@ -417,8 +418,9 @@ async def _safe_disconnect(client):
     if client is None:
         return
     try:
-        if client.is_connected():
-            await asyncio.wait_for(client.disconnect(), timeout=3)
+        coro = client.disconnect()
+        if asyncio.iscoroutine(coro) or hasattr(coro, "__await__"):
+            await asyncio.wait_for(coro, timeout=3)
     except Exception:
         pass
 
