@@ -14,9 +14,6 @@ from telethon.sessions import StringSession
 from telethon.errors import (
     SessionPasswordNeededError,
     FloodWaitError,
-    PhoneNumberBannedError,
-    PhoneCodeInvalidError,
-    PhoneCodeExpiredError,
     AuthKeyUnregisteredError,
     UserDeactivatedError,
     UserDeactivatedBanError,
@@ -69,7 +66,6 @@ log = logging.getLogger("farketmezda")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telethon.network.mtprotosender").setLevel(logging.WARNING)
-logging.getLogger("telethon.client.updates").setLevel(logging.ERROR)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -366,7 +362,7 @@ async def _cancel_task_immediately(task_key: str):
     if task and not task.done():
         task.cancel()
         try:
-            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2.5)
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
         except Exception:
             pass
 
@@ -410,9 +406,6 @@ async def _build_telethon_client(s_string):
         StringSession(clean_string),
         API_ID,
         API_HASH,
-        device_model="iPhone 15 Pro",
-        system_version="iOS 18.1",
-        app_version="11.3",
         connection_retries=4,
         retry_delay=2,
         auto_reconnect=False,
@@ -424,9 +417,8 @@ async def _safe_disconnect(client):
     if client is None:
         return
     try:
-        coro = client.disconnect()
-        if asyncio.iscoroutine(coro) or hasattr(coro, "__await__"):
-            await asyncio.wait_for(coro, timeout=3)
+        if client.is_connected():
+            await asyncio.wait_for(client.disconnect(), timeout=3)
     except Exception:
         pass
 
@@ -440,9 +432,6 @@ async def _verify_and_save_session(uid, s_name, phone, s_string):
         StringSession(clean_string),
         API_ID,
         API_HASH,
-        device_model="iPhone 15 Pro",
-        system_version="iOS 18.1",
-        app_version="11.3",
         connection_retries=3,
         retry_delay=2,
         auto_reconnect=False,
@@ -458,103 +447,6 @@ async def _verify_and_save_session(uid, s_name, phone, s_string):
         await asyncio.to_thread(db.save_session_db, uid, s_name, phone, final_string, username=username)
     finally:
         await _safe_disconnect(verify_client)
-
-
-async def kod_iste_ve_logla(client: TelegramClient, phone: str):
-    try:
-        sent = await asyncio.wait_for(client.send_code_request(phone), timeout=20)
-        kod_tipi = type(getattr(sent, "type", None)).__name__
-        timeout_sn = getattr(sent, "timeout", None)
-        p_hash = getattr(sent, "phone_code_hash", None)
-        print(f"[CODE_SENT] phone={phone} type={kod_tipi} timeout={timeout_sn}", flush=True)
-        return True, kod_tipi, timeout_sn, p_hash
-    except (FloodWaitError, PhoneNumberBannedError, SessionPasswordNeededError) as e:
-        print(f"[CODE_ERR] phone={phone} err={type(e).__name__}: {e}", flush=True)
-        return False, f"{type(e).__name__}: {e}", None, None
-    except Exception as e:
-        print(f"[CODE_ERR_UNEXPECTED] phone={phone} err={type(e).__name__}: {e}", flush=True)
-        return False, f"{type(e).__name__}: {e}", None, None
-
-
-async def request_login_code_with_diag(phone: str):
-    clean_phone = re.sub(r"[^\d+]", "", str(phone or "").strip())
-    if not clean_phone.startswith("+"):
-        clean_phone = f"+{clean_phone}"
-
-    temp_client = TelegramClient(
-        StringSession(),
-        API_ID,
-        API_HASH,
-        device_model="iPhone 15 Pro",
-        system_version="iOS 18.1",
-        app_version="11.3",
-        connection_retries=3,
-        retry_delay=2,
-        auto_reconnect=False,
-        timeout=20,
-    )
-    try:
-        await asyncio.wait_for(temp_client.connect(), timeout=20)
-        ok, kod_tipi_veya_hata, timeout_sn, p_hash = await kod_iste_ve_logla(temp_client, clean_phone)
-        if not ok:
-            await _safe_disconnect(temp_client)
-            return False, None, clean_phone, None, f"Kod gönderilemedi ({kod_tipi_veya_hata})"
-        msg = (
-            f"✅ Kod isteği gönderildi.\n"
-            f"• Kanal: `{kod_tipi_veya_hata}`\n"
-            f"• Bekleme süresi: `{timeout_sn}` sn\n"
-            f"Gelen kodu şimdi yazın:"
-        )
-        return True, temp_client, clean_phone, p_hash, msg
-    except Exception as e:
-        print(f"[SEND_CODE_ERR] phone={clean_phone} err={type(e).__name__}: {e}", flush=True)
-        await _safe_disconnect(temp_client)
-        return False, None, clean_phone, None, f"Kod isteği hatası ({type(e).__name__}): {e}"
-
-
-async def confirm_login_code_and_save(
-    uid: int,
-    s_name: str,
-    phone: str,
-    temp_client: TelegramClient,
-    phone_code_hash: str | None,
-    code: str,
-    password: str | None = None,
-):
-    clean_code = str(code or "").strip().replace(" ", "")
-    try:
-        if not temp_client.is_connected():
-            await asyncio.wait_for(temp_client.connect(), timeout=20)
-        if phone_code_hash:
-            await asyncio.wait_for(
-                temp_client.sign_in(phone=phone, code=clean_code, phone_code_hash=phone_code_hash),
-                timeout=20,
-            )
-        else:
-            await asyncio.wait_for(temp_client.sign_in(phone=phone, code=clean_code), timeout=20)
-
-        session_str = temp_client.session.save()
-        await _verify_and_save_session(uid, s_name, phone, session_str)
-        await _safe_disconnect(temp_client)
-        return True, None, "✅ Hesap başarıyla doğrulandı ve kaydedildi."
-    except SessionPasswordNeededError:
-        if not password:
-            return False, "NEED_2FA", "🔐 İki adımlı doğrulama (2FA) şifrenizi girin:"
-        try:
-            await asyncio.wait_for(temp_client.sign_in(password=str(password).strip()), timeout=20)
-            session_str = temp_client.session.save()
-            await _verify_and_save_session(uid, s_name, phone, session_str)
-            await _safe_disconnect(temp_client)
-            return True, None, "✅ 2FA doğrulandı ve hesap başarıyla kaydedildi."
-        except Exception as e2:
-            await _safe_disconnect(temp_client)
-            return False, "ERR", f"❌ 2FA giriş hatası: {e2}"
-    except (PhoneCodeInvalidError, PhoneCodeExpiredError) as e:
-        await _safe_disconnect(temp_client)
-        return False, "ERR", f"❌ Kod geçersiz veya süresi dolmuş ({type(e).__name__})."
-    except Exception as e:
-        await _safe_disconnect(temp_client)
-        return False, "ERR", f"❌ Giriş doğrulanamadı: {e}"
 
 
 async def _ensure_client_connected(client, s_string, phone):
@@ -856,7 +748,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     acc_restricted = restricted_groups_by_account.get(s_name, {})
                     success_count, fail_count, skipped_count = 0, 0, 0
                     failed_group_list = []
-                    delay_sec = await _get_effective_delay(uid, s_name)
 
                     for idx, group in enumerate(groups):
                         if int(uid) in _explicitly_stopped_users:
@@ -924,483 +815,702 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                         )
                                         await _safe_disconnect(client)
                                         active_clients.pop(s_name, None)
-                                        await asyncio.sleep(2.0)
-                                        continue
+                                        await _sleep_exact_seconds(3, uid, task_key, target_s_name)
+                                        try:
+                                            client = await _ensure_client_connected(None, s_string, phone)
+                                            active_clients[s_name] = client
+                                            client = await _send_single_message(
+                                                client, s_string, phone, group.id, ad_text, ad_entities
+                                            )
+                                            active_clients[s_name] = client
+                                            success_count += 1
+                                            did_send = True
+                                            break
+                                        except asyncio.CancelledError:
+                                            raise
+                                        except FloodWaitError:
+                                            continue
+                                        except Exception as retry_exc:
+                                            if _is_write_restricted_error(retry_exc):
+                                                _add_restricted_group(s_name, g_id, g_title, str(retry_exc))
+                                            fail_count += 1
+                                            failed_group_list.append(g_title)
+                                            await _notify_error(
+                                                context,
+                                                chat_id,
+                                                f"Gonderim Hatasi - {phone} ({g_title})",
+                                                retry_exc,
+                                                "Siradaki grupla reklama devam ediliyor.",
+                                            )
+                                            break
                                     fail_count += 1
                                     failed_group_list.append(g_title)
                                     await _notify_error(
                                         context,
                                         chat_id,
-                                        f"Gonderim - {phone} ({g_title})",
+                                        f"Mesaj Gonderimi - {phone} ({g_title})",
                                         exc,
-                                        "Sonraki gruba gecilip reklama devam ediliyor.",
+                                        "Bu grup atlanip reklama devam ediliyor.",
                                     )
                                     break
 
-                        if did_send and delay_sec > 0 and idx < len(groups) - 1:
-                            await _sleep_exact_seconds(delay_sec, uid, task_key, target_s_name)
+                        group_interval = await _get_effective_delay(uid, s_name)
+                        if did_send and group_interval > 0 and idx < len(groups) - 1:
+                            await _sleep_exact_seconds(group_interval, uid, task_key, target_s_name)
 
-                    failed_reports_cache[s_name] = {
-                        "phone": phone,
-                        "success": success_count,
-                        "fail": fail_count,
-                        "skipped": skipped_count,
-                        "groups": failed_group_list[-30:],
-                    }
+                    failed_reports_cache[s_name] = failed_group_list
+                    loop_interval = await _get_effective_loop(uid, s_name)
 
-                loop_sec = await _get_effective_loop(uid, target_s_name or "default")
-                if loop_sec > 0:
-                    await _sleep_exact_seconds(loop_sec, uid, task_key, target_s_name)
+                    if int(uid) in _explicitly_stopped_users:
+                        raise asyncio.CancelledError()
+                    if task_key not in tasks or tasks.get(task_key) is not asyncio.current_task():
+                        raise asyncio.CancelledError()
+                    u_chk3 = await asyncio.to_thread(db.get_user, uid)
+                    if (u_chk3 or {}).get("is_running", 0) == 0:
+                        raise asyncio.CancelledError()
+
+                    report_text = (
+                        f"📊 **[{phone}] REKLAM TURU TAMAMLANDI**\n"
+                        f"✅ Başarılı: {success_count} | ❌ Hatalı: {fail_count} | 🚫 Atlanan: {skipped_count}\n"
+                        f"⏳ *Sonraki tur {loop_interval} saniye sonra başlayacak.*"
+                    )
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=report_text, parse_mode="Markdown")
+                    except Exception:
+                        pass
+
+                    await _safe_disconnect(active_clients.pop(s_name, None))
+                    if loop_interval > 0:
+                        await _sleep_exact_seconds(loop_interval, uid, task_key, target_s_name)
+
             except asyncio.CancelledError:
                 raise
-            except Exception as loop_err:
-                log.error(f"[{task_key}] Döngü hatası: {loop_err}")
-                await _notify_error(context, chat_id, "Reklam Döngüsü", loop_err, "10 saniye sonra tekrar denenecek.")
-                await _sleep_exact_seconds(10, uid, task_key, target_s_name)
+            except Exception as tour_err:
+                for _, c in list(active_clients.items()):
+                    await _safe_disconnect(c)
+                active_clients.clear()
+                await _notify_error(
+                    context,
+                    chat_id,
+                    "Tur Dongusu",
+                    tour_err,
+                    "10 saniye sonra reklama kaldigi yerden devam edilecek.",
+                )
+                await asyncio.sleep(10)
+
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        await _notify_error(
+            context,
+            chat_id,
+            "Ana Dongu",
+            e,
+            "10 saniye sonra dongu yeniden baslatilacak.",
+        )
+        await asyncio.sleep(10)
+        if int(uid) not in _explicitly_stopped_users and tasks.get(task_key) is asyncio.current_task():
+            tasks[task_key] = asyncio.create_task(sender_loop(uid, context, chat_id, target_s_name))
     finally:
-        for c in list(active_clients.values()):
+        for _, c in list(active_clients.items()):
             await _safe_disconnect(c)
         active_clients.clear()
-        if task_key in tasks and tasks.get(task_key) is asyncio.current_task():
+        if tasks.get(task_key) is asyncio.current_task():
             tasks.pop(task_key, None)
-async def show_pricing_panel(update, context):
-    q = update.callback_query
-    text = (
-        "💎 **FARKETMEZDA PLATINUM | ABONELİK & FİYATLAR**\n\n"
-        "• **Günlük Paket:** 200 TL\n"
-        "• **Haftalık Paket:** 400 TL\n"
-        "• **Aylık Paket:** 1000 TL\n\n"
-        "Lisans almak için **`@farketmezda`** ile iletişime geçebilir veya elinizdeki anahtarı **🔑 KEY Aktif Et** menüsünden girebilirsiniz."
-    )
-    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
 
-async def show_accounts(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    rows = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
-    if not rows:
-        await q.edit_message_text(
-            "👤 **Hesaplarım**\n\nHenüz kayıtlı hesabınız bulunmuyor. **➕ Hesap Ekle** butonundan ekleyebilirsiniz.",
+async def stop_sender(uid, chat_id, context, target_s_name=None):
+    _explicitly_stopped_users.add(int(uid))
+    if not target_s_name:
+        await asyncio.to_thread(db.set_user, uid, is_running=0)
+        try:
+            user_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+            for s_name, _, _ in user_sessions or []:
+                await asyncio.to_thread(_set_single_account_state, str(s_name), False)
+        except Exception:
+            pass
+        keys_to_stop = [k for k in list(tasks.keys()) if k.startswith(f"{uid}_")]
+    else:
+        await asyncio.to_thread(_set_single_account_state, target_s_name, False)
+        keys_to_stop = [f"{uid}_acc_{target_s_name}"]
+        remaining_running = await asyncio.to_thread(_get_running_single_accounts_for_user, uid)
+        if not remaining_running and f"{uid}_auto_all_accounts" not in tasks:
+            await asyncio.to_thread(db.set_user, uid, is_running=0)
+
+    for key in keys_to_stop:
+        await _cancel_task_immediately(key)
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏹ **Reklam otomasyonu anında ve güvenli bir şekilde durduruldu.**",
             parse_mode="Markdown",
-            reply_markup=sub_menu_keyboard(),
         )
-        return
-
-    lines = ["👤 **KAYITLI HESAPLARIM**\n"]
-    kb_rows = []
-    for idx, row in enumerate(rows, start=1):
-        s_name = row[0]
-        phone = row[1]
-        uname = row[3] if len(row) > 3 and row[3] else ""
-        u_tag = f" (@{uname})" if uname else ""
-        lines.append(f"{idx}. `{phone}`{u_tag} — `{s_name}`")
-        kb_rows.append([InlineKeyboardButton(f"🗑 Sil: {phone}", callback_data=f"del_acc:{s_name}")])
-    kb_rows.append([InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")])
-    await q.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows))
+    except Exception:
+        pass
 
 
-async def show_start_stop_menu(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    u_info = await asyncio.to_thread(db.get_user, uid) or {}
-    is_run = int(u_info.get("is_running", 0) or 0) == 1
-    rows = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
-
-    status_txt = "🟢 ÇALIŞIYOR" if is_run else "🔴 DURDURULDU"
-    lines = [
-        "▶️ **BAŞLAT / ⏹ DURDUR YÖNETİMİ**\n",
-        f"• **Genel Reklam Durumu:** {status_txt}",
-        f"• **Kayıtlı Hesap Sayısı:** `{len(rows)}`\n",
-    ]
-    kb_rows = [
-        [
-            InlineKeyboardButton("▶️ Tüm Hesapları Başlat", callback_data="start_all"),
-            InlineKeyboardButton("⏹ Tümünü Durdur", callback_data="stop_all"),
-        ]
-    ]
-    for row in rows[:15]:
-        s_name, phone = row[0], row[1]
-        kb_rows.append([
-            InlineKeyboardButton(f"▶️ {phone}", callback_data=f"start_acc:{s_name}"),
-            InlineKeyboardButton(f"⏹ {phone}", callback_data=f"stop_acc:{s_name}"),
-        ])
-    kb_rows.append([InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")])
-    await q.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows))
+async def resume_active_users_background(application):
+    log.info("Açılışta otomatik başlatma kapalı: yalnızca kullanıcı Başlat komutu/butonu verdiğinde çalışacak.")
 
 
-async def show_account_config_menu(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    rows = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
-    u_info = await asyncio.to_thread(db.get_user, uid) or {}
-    def_delay = u_info.get("interval_seconds", 15)
-    def_loop = u_info.get("loop_interval_seconds", 240)
-
-    lines = [
-        "📩 **HESABA ÖZEL METİN & SÜRELER**\n",
-        f"• **Varsayılan Mesaj Arası Süre:** `{def_delay}` sn",
-        f"• **Varsayılan Tur Arası Süre:** `{def_loop}` sn\n",
-        "Ayarlamak istediğiniz hesabı seçin:",
-    ]
-    kb_rows = []
-    for row in rows[:15]:
-        s_name, phone = row[0], row[1]
-        c_txt = await asyncio.to_thread(db.get_account_custom_text, s_name)
-        c_del = await asyncio.to_thread(db.get_account_delay, s_name)
-        c_loop = await asyncio.to_thread(db.get_account_loop, s_name)
-        badge = "📝" if c_txt else "📄"
-        d_txt = f"{c_del}s" if c_del is not None else f"{def_delay}s"
-        l_txt = f"{c_loop}s" if c_loop is not None else f"{def_loop}s"
-        lines.append(f"{badge} `{phone}` → Ara: `{d_txt}` | Tur: `{l_txt}`")
-        kb_rows.append([
-            InlineKeyboardButton(f"📝 Metin: {phone}", callback_data=f"set_acc_text:{s_name}"),
-            InlineKeyboardButton(f"⏱ Süre: {phone}", callback_data=f"set_acc_delay:{s_name}"),
-        ])
-    kb_rows.append([InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")])
-    await q.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows))
+async def post_init(application):
+    asyncio.create_task(resume_active_users_background(application))
 
 
-async def show_restricted_groups_menu(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    rows = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
-    lines = ["🚧 **YAZILAMAYAN / MUTELİ GRUPLAR**\n"]
-    total = 0
-    for row in rows:
-        s_name, phone = row[0], row[1]
+async def _restart_running_account_task_if_active(uid: int, s_name: str, chat_id: int, context):
+    acc_key = f"{uid}_acc_{s_name}"
+    all_key = f"{uid}_auto_all_accounts"
+    if acc_key in tasks and not tasks[acc_key].done():
+        await start_sender(uid, chat_id, context, target_s_name=s_name, force_restart=True)
+    elif all_key in tasks and not tasks[all_key].done():
+        await start_sender(uid, chat_id, context, target_s_name=None, force_restart=True)
+
+
+async def _render_restricted_groups_menu(q, uid: int):
+    db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
+    rows = []
+    lines = ["🚧 **YAZILAMAYAN / MUTELİ GRUPLAR LİSTESİ**\n"]
+    total_found = 0
+
+    for s_name, phone, _ in db_sessions:
         acc_map = restricted_groups_by_account.get(s_name, {})
-        if acc_map:
-            lines.append(f"📱 `{phone}` ({len(acc_map)} grup):")
-            for g_id, info in list(acc_map.items())[:10]:
-                total += 1
-                lines.append(f"  • {info.get('title', g_id)} (`{g_id}`)")
-    if total == 0:
-        lines.append("Şu an yazılamayan veya muteli grup kaydı bulunmuyor.")
-    lines.append("\nKaldırmak için: `/unmute_group <grup_id_veya_adi>`")
-    await q.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=sub_menu_keyboard())
+        if not acc_map:
+            continue
+        lines.append(f"📱 `{phone}`:")
+        for g_id, info in list(acc_map.items())[:15]:
+            total_found += 1
+            g_title = info.get("title", g_id)
+            lines.append(f"  • {g_title} (`{g_id}`)")
+            rows.append([
+                InlineKeyboardButton(
+                    f"✅ Muteyi Aç / Tekrar Dene: {g_title[:24]}",
+                    callback_data=f"unmute_grp_{s_name}_{g_id}",
+                )
+            ])
+
+    if total_found == 0:
+        lines.append("Şu an yazılamayan/muteli listesinde bekleyen grup yok.")
+    else:
+        lines.append("\nKurucu muteyi kaldırdıktan sonra ilgili butona basarak grubu tekrar reklam listesine alabilirsin.")
+
+    rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+    await q.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
 
-async def show_failed_reports(update, context):
+async def button(update, context):
     q = update.callback_query
-    uid = update.effective_user.id
-    rows = await asyncio.to_thread(db.get_user_sessions_db, uid) or []
-    lines = ["📊 **BAŞARISIZ RAPORLAR**\n"]
-    any_rep = False
-    for row in rows:
-        s_name, phone = row[0], row[1]
-        rep = failed_reports_cache.get(s_name)
-        if rep:
-            any_rep = True
-            lines.append(
-                f"📱 `{phone}` — Başarılı: `{rep.get('success', 0)}` | "
-                f"Başarısız: `{rep.get('fail', 0)}` | Atlanan: `{rep.get('skipped', 0)}`"
-            )
-            if rep.get("groups"):
-                lines.append("  Hatalı gruplar: " + ", ".join(rep["groups"][-10:]))
-    if not any_rep:
-        lines.append("Henüz rapor verisi oluşmadı.")
-    await q.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=sub_menu_keyboard())
-
-
-async def show_blacklist_menu(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    bl = sorted(list(blacklisted_groups.get(uid, set())))
-    pending[uid] = {"step": "WAIT_BLACKLIST_ADD"}
-    txt = (
-        "🚫 **GENEL GRUP ENGEL LİSTESİ**\n\n"
-        f"Kayıtlı engel sayısı: `{len(bl)}`\n"
-        + (("\n• " + "\n• ".join(f"`{x}`" for x in bl[:20])) if bl else "")
-        + "\n\nEngellenecek grup ID veya `@kullaniciadi` yazıp gönderin:"
-    )
-    await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
-
-
-async def show_redeem_menu(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    pending[uid] = {"step": "WAIT_REDEEM_KEY"}
-    await q.edit_message_text(
-        "🔑 **LİSANS KEY AKTİF ET**\n\nLütfen elinizdeki lisans anahtarını (KEY) yazıp gönderin:",
-        parse_mode="Markdown",
-        reply_markup=sub_menu_keyboard(),
-    )
-
-
-async def show_admin_panel(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    if not is_admin(uid):
-        await q.edit_message_text("⛔ Bu alan yalnızca yöneticiye açıktır.", reply_markup=sub_menu_keyboard())
-        return
-    await q.edit_message_text(
-        "👑 **YÖNETİCİ PANELİ**\n\nLisans anahtarı üretebilir, listeyi inceleyebilir veya duyuru geçebilirsiniz.",
-        parse_mode="Markdown",
-        reply_markup=admin_keyboard(),
-    )
-
-
-async def handle_callback(update, context):
-    q = update.callback_query
-    uid = update.effective_user.id
-    data = q.data or ""
     try:
         await q.answer()
     except Exception:
         pass
+    uid, action = q.from_user.id, q.data
+    asyncio.create_task(asyncio.to_thread(db.ensure_user, uid, q.from_user.username))
 
-    if data == "home":
-        pending.pop(uid, None)
+    if action == "home":
         await show_home(update, context)
-        return
-    if data == "guide_menu":
+    elif action == "guide_menu":
         await show_guide(update, context)
-        return
-    if data == "pricing_panel":
-        await show_pricing_panel(update, context)
-        return
-    if data == "accounts":
-        await show_accounts(update, context)
-        return
-    if data.startswith("del_acc:"):
-        s_name = data.split(":", 1)[1]
-        await asyncio.to_thread(db.delete_session_db, s_name)
-        await show_accounts(update, context)
-        return
-    if data == "start_stop_menu":
-        await show_start_stop_menu(update, context)
-        return
-    if data == "start_all":
-        await start_sender(uid, q.message.chat_id, context, target_s_name=None)
-        await show_start_stop_menu(update, context)
-        return
-    if data == "stop_all":
-        _explicitly_stopped_users.add(int(uid))
-        await asyncio.to_thread(db.set_user, uid, is_running=0)
-        await _purge_user_stale_runs(uid, target_s_name=None)
-        await show_start_stop_menu(update, context)
-        return
-    if data.startswith("start_acc:"):
-        s_name = data.split(":", 1)[1]
-        await start_sender(uid, q.message.chat_id, context, target_s_name=s_name)
-        await show_start_stop_menu(update, context)
-        return
-    if data.startswith("stop_acc:"):
-        s_name = data.split(":", 1)[1]
+    elif action == "restricted_groups_menu":
+        await _render_restricted_groups_menu(q, uid)
+    elif action.startswith("unmute_grp_"):
+        payload = action.replace("unmute_grp_", "", 1)
+        if "_" in payload:
+            s_name, g_id = payload.rsplit("_", 1)
+            ok = _remove_restricted_group(s_name, g_id)
+            if ok:
+                try:
+                    await q.answer("✅ Grup listeden çıkarıldı, tekrar reklam atılacak!", show_alert=False)
+                except Exception:
+                    pass
+        await _render_restricted_groups_menu(q, uid)
+    elif action == "pricing_panel":
+        text = (
+            "💎 **ABONELİK VE FİYAT LİSTESİ**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📅 **Günlük Paket:** 200 TL\n"
+            "📆 **Haftalık Paket:** 400 TL\n"
+            "🗓 **Aylık Paket:** 1000 TL\n\n"
+            "Satın almak istediğiniz paketi seçin:"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Günlük (200 TL) Satın Al", callback_data="buy_daily")],
+            [InlineKeyboardButton("💳 Haftalık (400 TL) Satın Al", callback_data="buy_weekly")],
+            [InlineKeyboardButton("💳 Aylık (1000 TL) Satın Al", callback_data="buy_monthly")],
+            [InlineKeyboardButton("🔑 KEY'im Var (Kod Gir)", callback_data="redeem")],
+            [InlineKeyboardButton("⬅ Ana Menü", callback_data="home")],
+        ])
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    elif action in ["buy_daily", "buy_weekly", "buy_monthly"]:
+        p_name, p_price, days = (
+            ("Günlük Paket", "200 TL", 1)
+            if action == "buy_daily"
+            else (("Haftalık Paket", "400 TL", 7) if action == "buy_weekly" else ("Aylık Paket", "1000 TL", 30))
+        )
+        context.user_data["pending_buy_days"] = days
+        context.user_data["pending_buy_name"] = p_name
+
+        pay_text = (
+            f"💳 **ÖDEME BİLDİRİMİ VE DETAYLARI**\n"
+            f"📦 Paket: **{p_name}** | Tutar: **{p_price}**\n\n"
+            f"🏦 **İBAN:** `TR100006200091000006969709`\n"
+            f"• **Alıcı:** Garanti Ödeme ve Elektronik Para Hizmetleri A.Ş.\n"
+            f"• **Açıklama:** `TAMİ7696919784875077`"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Dekont Gönder", callback_data="send_receipt_prompt")],
+            [InlineKeyboardButton("⬅ Geri", callback_data="pricing_panel")],
+        ])
+        await q.edit_message_text(pay_text, parse_mode="Markdown", reply_markup=kb)
+    elif action == "send_receipt_prompt":
+        context.user_data["flow"] = "awaiting_receipt"
+        await q.edit_message_text(
+            "📤 Lütfen yaptığınız ödemenin **dekont fotoğrafını** bota doğrudan gönderin:",
+            parse_mode="Markdown",
+            reply_markup=sub_menu_keyboard(),
+        )
+    elif action == "add":
+        if not await asyncio.to_thread(has_valid_access, uid):
+            await q.edit_message_text("❌ Aktif lisansınız yok.", reply_markup=sub_menu_keyboard())
+            return
+        context.user_data["flow"] = "phone"
+        await q.edit_message_text(
+            "➕ Telefon numaranızı +ülke kodu ile gönderin (`+90...`):",
+            parse_mode="Markdown",
+            reply_markup=sub_menu_keyboard(),
+        )
+    elif action == "accounts":
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+        if not db_sessions:
+            await q.edit_message_text("👤 Kayıtlı hesabınız yok.", reply_markup=get_keyboard(uid))
+            return
+        rows = []
+        for s_name, phone, _ in db_sessions:
+            uname = await asyncio.to_thread(db.get_account_username, s_name)
+            display_str = f"@{uname} | {phone}" if uname else f"Kullanıcı Adı Yok | {phone}"
+            rows.append([InlineKeyboardButton(f"📱 {display_str}", callback_data=f"manage_{s_name}")])
+        rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+        await q.edit_message_text(
+            "👤 **HESAPLARIM VE KULLANICI ADLARI**",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+    elif action.startswith("manage_"):
+        s_name = action.replace("manage_", "")
+        cur_delay = await _get_effective_delay(uid, s_name)
+        cur_loop = await _get_effective_loop(uid, s_name)
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("▶️ Başlat", callback_data=f"start_one_{s_name}"),
+                InlineKeyboardButton("⏹ Durdur", callback_data=f"stop_one_{s_name}"),
+            ],
+            [InlineKeyboardButton("✍️ Bu Hesaba Özel Metin Gir", callback_data=f"set_acc_text_{s_name}")],
+            [InlineKeyboardButton("⏱ Süreleri Ayarla", callback_data=f"set_acc_times_{s_name}")],
+            [InlineKeyboardButton("🚧 Yazılamayan / Muteli Gruplar", callback_data="restricted_groups_menu")],
+            [InlineKeyboardButton("🚫 Gruba Özel Engel", callback_data=f"acc_bl_{s_name}")],
+            [InlineKeyboardButton("❌ Hesabı Sil", callback_data=f"del_{s_name}")],
+            [InlineKeyboardButton("⬅ Geri", callback_data="accounts")],
+        ])
+        await q.edit_message_text(
+            f"📱 **Hesap Yönetim Paneli**\n⏱ Grup Arası: `{cur_delay}s` | 🔄 Tur Dinlenme: `{cur_loop}s`",
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+    elif action == "account_config_menu":
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+        if not db_sessions:
+            await q.edit_message_text("❌ Yapılandırılacak hesabınız yok.", reply_markup=get_keyboard(uid))
+            return
+        rows = []
+        for s_name, phone, _ in db_sessions:
+            uname = await asyncio.to_thread(db.get_account_username, s_name)
+            disp = f"@{uname}" if uname else phone
+            rows.append([InlineKeyboardButton(f"⚙️ Ayarla: {disp}", callback_data=f"manage_{s_name}")])
+        rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+        await q.edit_message_text(
+            "📩 **HESABA ÖZEL METİN VE SÜRE YAPILANDIRMASI**\n\nİşlem yapmak istediğiniz hesabı seçin:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+    elif action.startswith("start_one_"):
+        s_name = action.replace("start_one_", "")
+        await start_sender(uid, q.message.chat_id, context, target_s_name=s_name, force_restart=True)
+        await q.message.reply_text("▶️ **Seçilen hesap için reklam başlatıldı!**", parse_mode="Markdown")
+    elif action.startswith("stop_one_"):
+        s_name = action.replace("stop_one_", "")
+        await stop_sender(uid, q.message.chat_id, context, target_s_name=s_name)
+    elif action.startswith("set_acc_text_"):
+        s_name = action.replace("set_acc_text_", "")
+        context.user_data["flow"] = f"acc_text_input_{s_name}"
+        await q.edit_message_text(
+            "✍️ Bu hesabın göndereceği **özel reklam metnini** yazın.\n\n"
+            "💡 _Kayıtlı Mesajlar kullanmak için `sil` yazın._",
+            parse_mode="Markdown",
+            reply_markup=sub_menu_keyboard(),
+        )
+    elif action.startswith("set_acc_times_"):
+        s_name = action.replace("set_acc_times_", "")
+        context.user_data["flow"] = f"acc_times_delay_{s_name}"
+        await q.edit_message_text(
+            "⏱ Bu hesap için **grup arası bekleme süresini (saniye)** yazın:",
+            parse_mode="Markdown",
+            reply_markup=sub_menu_keyboard(),
+        )
+    elif action == "start_stop_menu":
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+        if not db_sessions:
+            await q.edit_message_text("❌ Yönetilecek hesabınız yok.", reply_markup=get_keyboard(uid))
+            return
+        rows = [
+            [
+                InlineKeyboardButton("▶️ Tümünü Başlat", callback_data="start_all_acc"),
+                InlineKeyboardButton("⏹ Tümünü Anında Durdur", callback_data="stop_all_acc"),
+            ]
+        ]
+        for s_name, phone, _ in db_sessions:
+            uname = await asyncio.to_thread(db.get_account_username, s_name)
+            disp = f"@{uname}" if uname else phone
+            rows.append([
+                InlineKeyboardButton(f"▶️ Başlat: {disp}", callback_data=f"start_one_{s_name}"),
+                InlineKeyboardButton(f"⏹ Durdur: {disp}", callback_data=f"stop_one_{s_name}"),
+            ])
+        rows.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+        await q.edit_message_text(
+            "▶️ **ANA PANELDEN BAŞLAT / DURDUR KONTROLÜ**",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+    elif action == "start_all_acc":
+        await start_sender(uid, q.message.chat_id, context, target_s_name=None, force_restart=True)
+        await q.message.reply_text("▶️ **Tüm hesaplar için reklam otomasyonu başlatıldı!**", parse_mode="Markdown")
+    elif action == "stop_all_acc":
+        await stop_sender(uid, q.message.chat_id, context, target_s_name=None)
+    elif action == "failed_reports":
+        db_sessions = await asyncio.to_thread(db.get_user_sessions_db, uid)
+        report_lines = ["📊 **BAŞARISIZ GÖNDERİM RAPORLARI**\n"]
+        for s_name, phone, _ in db_sessions or []:
+            fails = failed_reports_cache.get(s_name, [])
+            muted_cnt = len(restricted_groups_by_account.get(s_name, {}))
+            report_lines.append(f"📱 `{phone}` -> Başarısız Grup: {len(fails)} | Muteli/Yazılamayan: {muted_cnt}")
+            if fails:
+                report_lines.append(f"  • Hata Alınanlar: {', '.join(fails[:5])}")
+        await q.edit_message_text("\n".join(report_lines), parse_mode="Markdown", reply_markup=sub_menu_keyboard())
+    elif action.startswith("acc_bl_"):
+        s_name = action.replace("acc_bl_", "")
+        context.user_data["flow"] = f"acc_blacklist_add_{s_name}"
+        await q.edit_message_text(
+            "🚫 Bu hesabın mesaj atmayacağı grubun linkini veya kullanıcı adını gönderin:",
+            reply_markup=sub_menu_keyboard(),
+        )
+    elif action.startswith("del_"):
+        s_name = action.replace("del_", "")
+        restricted_groups_by_account.pop(s_name, None)
         await asyncio.to_thread(_set_single_account_state, s_name, False)
         await _cancel_task_immediately(f"{uid}_acc_{s_name}")
-        await show_start_stop_menu(update, context)
-        return
-    if data == "account_config_menu":
-        await show_account_config_menu(update, context)
-        return
-    if data.startswith("set_acc_text:"):
-        s_name = data.split(":", 1)[1]
-        pending[uid] = {"step": "WAIT_ACC_TEXT", "s_name": s_name}
+        await asyncio.to_thread(db.delete_session_db, s_name)
+        await _safe_disconnect(clients.pop(s_name, None))
+        await q.edit_message_text("✅ Hesap silindi.", reply_markup=get_keyboard(uid))
+    elif action == "blacklist":
+        context.user_data["flow"] = "blacklist"
         await q.edit_message_text(
-            f"📝 `{s_name}` hesabı için yeni reklam metnini yazıp gönderin:",
-            parse_mode="Markdown",
+            "🚫 Genel engellenecek grup linkini veya kullanıcı adını gönderin:",
             reply_markup=sub_menu_keyboard(),
         )
-        return
-    if data.startswith("set_acc_delay:"):
-        s_name = data.split(":", 1)[1]
-        pending[uid] = {"step": "WAIT_ACC_DELAY", "s_name": s_name}
+    elif action == "redeem":
+        context.user_data["flow"] = "redeem"
+        await q.edit_message_text("🔑 KEY kodunu girin:", reply_markup=sub_menu_keyboard())
+    elif action == "admin" and is_admin(uid):
         await q.edit_message_text(
-            f"⏱ `{s_name}` hesabı için `mesaj_arasi_sn tur_arasi_sn` şeklinde iki sayı girin (örnek: `15 240`):",
-            parse_mode="Markdown",
-            reply_markup=sub_menu_keyboard(),
-        )
-        return
-    if data == "restricted_groups_menu":
-        await show_restricted_groups_menu(update, context)
-        return
-    if data == "failed_reports":
-        await show_failed_reports(update, context)
-        return
-    if data == "blacklist":
-        await show_blacklist_menu(update, context)
-        return
-    if data == "redeem":
-        await show_redeem_menu(update, context)
-        return
-    if data == "admin":
-        await show_admin_panel(update, context)
-        return
-    if data == "key_create" and is_admin(uid):
-        pending[uid] = {"step": "WAIT_ADMIN_KEY_SPEC"}
-        await q.edit_message_text(
-            "➕ İsim ve gün sayısını boşlukla yazın (örnek: `Ahmet 30`):",
+            "👑 **YÖNETİCİ LİSANS & İSİMLİ KEY ÜRETİM PANELİ**",
             parse_mode="Markdown",
             reply_markup=admin_keyboard(),
         )
-        return
-    if data == "key_list" and is_admin(uid):
-        keys = await asyncio.to_thread(db.list_keys_db) if hasattr(db, "list_keys_db") else []
-        txt = "📋 **KEY LİSTESİ**\n\n" + ("\n".join(str(k) for k in (keys or [])[:25]) or "Kayıt bulunamadı.")
-        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=admin_keyboard())
-        return
-    if data == "admin_broadcast" and is_admin(uid):
-        pending[uid] = {"step": "WAIT_BROADCAST"}
+    elif action == "key_create" and is_admin(uid):
+        context.user_data["flow"] = "key_note_and_days"
         await q.edit_message_text(
-            "📢 Tüm kullanıcılara gönderilecek duyuru metnini yazın:",
+            "➕ **İsimli KEY Üretimi**\n\nFormat: `İsim,GünSayısı`",
             parse_mode="Markdown",
             reply_markup=admin_keyboard(),
         )
-        return
-    if data == "add":
-        pending[uid] = {"step": "WAIT_PHONE"}
-        await q.edit_message_text(
-            "📲 Lütfen başında ülke koduyla telefon numarasını girin (örnek: `+905551234567`):",
-            parse_mode="Markdown",
-            reply_markup=sub_menu_keyboard(),
-        )
-        return
-
-    await show_home(update, context)
-
-
-async def handle_message(update, context):
-    uid = update.effective_user.id
-    txt = (update.effective_message.text or "").strip()
-    state = pending.get(uid)
-    if not state:
-        return
-
-    step = state.get("step")
-    if step == "WAIT_PHONE":
-        s_name = f"acc_{uid}_{secrets.token_hex(3)}"
-        await update.effective_message.reply_text("⏳ Kod isteği gönderiliyor, lütfen bekleyin...")
-        ok, temp_client, clean_phone, p_hash, info_msg = await request_login_code_with_diag(txt)
-        if not ok:
-            pending.pop(uid, None)
-            await update.effective_message.reply_text(f"❌ {info_msg}", reply_markup=sub_menu_keyboard())
-            return
-        pending[uid] = {
-            "step": "WAIT_CODE",
-            "s_name": s_name,
-            "phone": clean_phone,
-            "client": temp_client,
-            "phone_code_hash": p_hash,
-        }
-        await update.effective_message.reply_text(info_msg, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
-        return
-
-    if step == "WAIT_CODE":
-        ok, next_state, res_msg = await confirm_login_code_and_save(
-            uid=uid,
-            s_name=state["s_name"],
-            phone=state["phone"],
-            temp_client=state["client"],
-            phone_code_hash=state.get("phone_code_hash"),
-            code=txt,
-        )
-        if not ok and next_state == "NEED_2FA":
-            state["step"] = "WAIT_2FA"
-            await update.effective_message.reply_text(res_msg, reply_markup=sub_menu_keyboard())
-            return
-        pending.pop(uid, None)
-        await update.effective_message.reply_text(res_msg, reply_markup=get_keyboard(uid))
-        return
-
-    if step == "WAIT_2FA":
-        ok, _, res_msg = await confirm_login_code_and_save(
-            uid=uid,
-            s_name=state["s_name"],
-            phone=state["phone"],
-            temp_client=state["client"],
-            phone_code_hash=state.get("phone_code_hash"),
-            code="",
-            password=txt,
-        )
-        pending.pop(uid, None)
-        await update.effective_message.reply_text(res_msg, reply_markup=get_keyboard(uid))
-        return
-
-    if step == "WAIT_ACC_TEXT":
-        s_name = state["s_name"]
-        await asyncio.to_thread(db.set_account_custom_text, s_name, txt)
-        pending.pop(uid, None)
-        await update.effective_message.reply_text("✅ Hesaba özel reklam metni kaydedildi.", reply_markup=get_keyboard(uid))
-        return
-
-    if step == "WAIT_ACC_DELAY":
-        s_name = state["s_name"]
-        parts = txt.split()
+    elif action == "key_list" and is_admin(uid):
+        await admin_panel_refresh(q)
+    elif action.startswith("rev_key_") and is_admin(uid):
+        k_code = action.replace("rev_key_", "")
+        await asyncio.to_thread(db.revoke_license, k_code)
         try:
-            d_val = max(0, int(parts[0]))
-            l_val = max(0, int(parts[1])) if len(parts) > 1 else 240
-            await asyncio.to_thread(db.set_account_delay, s_name, d_val)
-            await asyncio.to_thread(db.set_account_loop, s_name, l_val)
-            pending.pop(uid, None)
+            await q.answer(f"🔑 Key iptal edildi: {k_code}", show_alert=True)
+        except Exception:
+            pass
+        await admin_panel_refresh(q)
+    elif action == "admin_broadcast" and is_admin(uid):
+        context.user_data["flow"] = "admin_broadcast_msg"
+        await q.edit_message_text("📢 Tüm kullanıcılara duyuru mesajını yazın:", reply_markup=admin_keyboard())
+    elif action.startswith("approve_pay_") and is_admin(uid):
+        target_uid = int(action.replace("approve_pay_", ""))
+        await asyncio.to_thread(db.add_license_time_db, target_uid, 30)
+        await q.edit_message_text("✅ Ödeme onaylandı.")
+        try:
+            await context.bot.send_message(chat_id=target_uid, text="🎉 Ödemeniz onaylandı!")
+        except Exception:
+            pass
+    elif action.startswith("reject_pay_") and is_admin(uid):
+        target_uid = int(action.replace("reject_pay_", ""))
+        await q.edit_message_text("❌ Ödeme reddedildi.")
+        try:
+            await context.bot.send_message(chat_id=target_uid, text="❌ Ödemeniz onaylanmadı.")
+        except Exception:
+            pass
+
+
+async def admin_panel_refresh(q):
+    rows = await asyncio.to_thread(db.list_licenses)
+    kb_list = []
+    for r in rows or []:
+        code = r["code"]
+        note = r.get("note", "İsimsiz")
+        status_icon = "🟢 Aktif" if not r["is_used"] else "🔴 Kullanıldı"
+        kb_list.append([
+            InlineKeyboardButton(f"{note} | {code} ({r['duration_days']}g) - {status_icon}", callback_data="ignore"),
+            InlineKeyboardButton("🗑 İptal Et", callback_data=f"rev_key_{code}"),
+        ])
+    kb_list.append([InlineKeyboardButton("⬅ Ana Menü", callback_data="home")])
+    await q.edit_message_text("📋 **KEY LİSTESİ VE SAHİPLERİ**", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_list))
+
+
+async def text_handler(update, context):
+    uid = update.effective_user.id
+    text = update.effective_message.text.strip() if update.effective_message.text else ""
+    flow = context.user_data.get("flow")
+
+    if update.effective_message.photo and flow == "awaiting_receipt":
+        photo = update.effective_message.photo[-1]
+        context.user_data.clear()
+        await update.effective_message.reply_text("✅ Dekont yöneticiye iletildi.", reply_markup=get_keyboard(uid))
+        kb_admin = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Onayla", callback_data=f"approve_pay_{uid}"),
+                InlineKeyboardButton("❌ Reddet", callback_data=f"reject_pay_{uid}"),
+            ]
+        ])
+        try:
+            await context.bot.send_photo(
+                chat_id=ADMIN_ID,
+                photo=photo.file_id,
+                caption=f"🚨 **ÖDEME TALEBİ**\nKullanıcı: `{uid}`",
+                parse_mode="Markdown",
+                reply_markup=kb_admin,
+            )
+        except Exception:
+            pass
+        return
+
+    if not flow:
+        return
+
+    if flow.startswith("acc_text_input_"):
+        s_name = flow.replace("acc_text_input_", "")
+        if text.lower() == "sil":
+            await asyncio.to_thread(db.set_account_custom_text, s_name, "")
             await update.effective_message.reply_text(
-                f"✅ Süreler güncellendi: Mesaj arası `{d_val}` sn | Tur arası `{l_val}` sn.",
+                "✅ Özel metin kaldırıldı (Kayıtlı Mesajlara dönüldü).",
+                reply_markup=get_keyboard(uid),
+            )
+        else:
+            await asyncio.to_thread(db.set_account_custom_text, s_name, clean_bold_stars(text))
+            await update.effective_message.reply_text("✅ Özel reklam metni kaydedildi!", reply_markup=get_keyboard(uid))
+        context.user_data.clear()
+        return
+
+    if flow.startswith("acc_times_delay_"):
+        s_name = flow.replace("acc_times_delay_", "")
+        try:
+            val = int(text)
+            if val < 0:
+                await update.effective_message.reply_text("Lütfen 0 veya daha büyük bir sayı girin.")
+                return
+            await asyncio.to_thread(db.set_account_delay, s_name, val)
+            context.user_data["flow"] = f"acc_times_loop_{s_name}"
+            await update.effective_message.reply_text(
+                f"✅ Grup arası bekleme süresi `{val}` saniye kaydedildi.\n\n"
+                "⏱ Şimdi **Tur Dinlenme Süresini (saniye)** yazın:",
+                parse_mode="Markdown",
+                reply_markup=sub_menu_keyboard(),
+            )
+        except ValueError:
+            await update.effective_message.reply_text("Lütfen geçerli bir sayı girin.")
+        return
+
+    if flow.startswith("acc_times_loop_"):
+        s_name = flow.replace("acc_times_loop_", "")
+        try:
+            val = int(text)
+            if val < 0:
+                await update.effective_message.reply_text("Lütfen 0 veya daha büyük bir sayı girin.")
+                return
+            await asyncio.to_thread(db.set_account_loop, s_name, val)
+            saved_delay = await _get_effective_delay(uid, s_name)
+            context.user_data.clear()
+            await _restart_running_account_task_if_active(uid, s_name, update.effective_message.chat_id, context)
+            await update.effective_message.reply_text(
+                f"✅ Süreler güncellendi!\n• Grup Arası: `{saved_delay}s`\n• Tur Dinlenme: `{val}s`",
                 parse_mode="Markdown",
                 reply_markup=get_keyboard(uid),
             )
-        except Exception:
-            await update.effective_message.reply_text("⚠️ Lütfen iki sayı girin, örneğin: `15 240`", parse_mode="Markdown")
+        except ValueError:
+            await update.effective_message.reply_text("Lütfen geçerli bir sayı girin.")
         return
 
-    if step == "WAIT_BLACKLIST_ADD":
-        s_set = blacklisted_groups.setdefault(uid, set())
-        s_set.add(txt.lower())
-        pending.pop(uid, None)
-        await update.effective_message.reply_text(f"✅ `{txt}` genel engel listesine eklendi.", parse_mode="Markdown", reply_markup=get_keyboard(uid))
-        return
-
-    if step == "WAIT_REDEEM_KEY":
-        pending.pop(uid, None)
+    if flow == "key_note_and_days" and is_admin(uid):
         try:
-            ok, msg = await asyncio.to_thread(db.redeem_key_db, uid, txt) if hasattr(db, "redeem_key_db") else (False, "KEY sistemi kontrol edilemedi.")
-            await update.effective_message.reply_text(msg, reply_markup=get_keyboard(uid))
+            parts = text.split(",")
+            if len(parts) < 2:
+                await update.effective_message.reply_text("❌ Hatalı format! `İsim,GünSayısı` şeklinde yazın.", parse_mode="Markdown")
+                return
+            note = parts[0].strip()
+            days = int(parts[1].strip())
+            code = "FKD-" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
+            await asyncio.to_thread(db.create_license, code, days, note=note)
+            context.user_data.clear()
+            await update.effective_message.reply_text(
+                f"✅ **KEY Üretildi:** `{code}` ({note} - {days} Gün)",
+                parse_mode="Markdown",
+                reply_markup=admin_keyboard(),
+            )
+        except ValueError:
+            await update.effective_message.reply_text("❌ Gün sayısı sayı olmalıdır.")
+        return
+
+    if flow == "admin_broadcast_msg" and is_admin(uid):
+        users = await asyncio.to_thread(db.get_all_users)
+        for u_id in users or []:
+            try:
+                await context.bot.send_message(chat_id=u_id, text=f"📢 **DUYURU**\n\n{text}", parse_mode="Markdown")
+            except Exception:
+                pass
+        context.user_data.clear()
+        await update.effective_message.reply_text("✅ Duyuru iletildi.", reply_markup=admin_keyboard())
+        return
+
+    if flow == "phone":
+        if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
+            await update.effective_message.reply_text("Geçerli numara girin (+90...)")
+            return
+        old_pending = pending.pop(uid, None)
+        if old_pending:
+            await _safe_disconnect(old_pending.get("client"))
+        session_name = f"SESSION_{uid}_{text}"
+        client = TelegramClient(
+            StringSession(),
+            API_ID,
+            API_HASH,
+            connection_retries=3,
+            auto_reconnect=False,
+            timeout=20,
+        )
+        await client.connect()
+        try:
+            sent = await client.send_code_request(text)
+            pending[uid] = {
+                "client": client,
+                "phone": text,
+                "hash": sent.phone_code_hash,
+                "session_name": session_name,
+            }
+            context.user_data["flow"] = "code"
+            await update.effective_message.reply_text(
+                "📲 Kod **Telegram uygulamanızdaki resmi 'Telegram' sohbetine** gönderildi.\n"
+                "Lütfen o sohbeti kontrol edip gelen kodu girin:",
+                parse_mode="Markdown",
+                reply_markup=sub_menu_keyboard(),
+            )
         except Exception as e:
-            await update.effective_message.reply_text(f"❌ KEY aktif edilemedi: {e}", reply_markup=get_keyboard(uid))
-        return
+            await _safe_disconnect(client)
+            await update.effective_message.reply_text(f"Hata: {e}")
 
-    if step == "WAIT_ADMIN_KEY_SPEC" and is_admin(uid):
-        pending.pop(uid, None)
-        parts = txt.split()
-        label = parts[0] if parts else "VIP"
-        days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 30
-        code_str = f"PLATINUM-{label.upper()}-{''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))}"
-        if hasattr(db, "create_key_db"):
-            try:
-                await asyncio.to_thread(db.create_key_db, code_str, days, label)
-            except Exception:
-                pass
-        await update.effective_message.reply_text(f"✅ Key üretildi ({days} gün):\n`{code_str}`", parse_mode="Markdown", reply_markup=admin_keyboard())
-        return
+    elif flow == "code":
+        item = pending.get(uid)
+        if not item:
+            await update.effective_message.reply_text(
+                "⚠️ Oturum isteği sıfırlanmış, lütfen numarayı tekrar girin.",
+                reply_markup=get_keyboard(uid),
+            )
+            return
+        code_clean = re.sub(r"\s+", "", text)
+        try:
+            await item["client"].sign_in(phone=item["phone"], code=code_clean, phone_code_hash=item["hash"])
+            s_name = item["session_name"]
+            raw_s_string = item["client"].session.save()
+            await _safe_disconnect(item["client"])
+            clients.pop(s_name, None)
+            await _verify_and_save_session(uid, s_name, item["phone"], raw_s_string)
+            pending.pop(uid, None)
+            context.user_data.clear()
+            await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
+        except SessionPasswordNeededError:
+            context.user_data["flow"] = "2fa"
+            await update.effective_message.reply_text("🔒 2FA şifrenizi girin:")
+        except Exception as e:
+            await update.effective_message.reply_text(f"Hata: {e}")
 
-    if step == "WAIT_BROADCAST" and is_admin(uid):
-        pending.pop(uid, None)
-        users = await asyncio.to_thread(db.get_all_users_db) if hasattr(db, "get_all_users_db") else []
-        sent_c = 0
-        for u_row in users or []:
-            target_id = u_row[0] if isinstance(u_row, (tuple, list)) else u_row
-            try:
-                await context.bot.send_message(chat_id=target_id, text=f"📢 **DUYURU**\n\n{txt}", parse_mode="Markdown")
-                sent_c += 1
-            except Exception:
-                pass
-        await update.effective_message.reply_text(f"✅ Duyuru `{sent_c}` kullanıcıya gönderildi.", parse_mode="Markdown", reply_markup=admin_keyboard())
-        return
+    elif flow == "2fa":
+        item = pending.get(uid)
+        if not item:
+            return
+        try:
+            await item["client"].sign_in(password=text)
+            s_name = item["session_name"]
+            raw_s_string = item["client"].session.save()
+            await _safe_disconnect(item["client"])
+            clients.pop(s_name, None)
+            await _verify_and_save_session(uid, s_name, item["phone"], raw_s_string)
+            pending.pop(uid, None)
+            context.user_data.clear()
+            await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
+        except Exception as e:
+            await update.effective_message.reply_text(f"Hata: {e}")
+
+    elif flow.startswith("acc_blacklist_add_"):
+        s_name = flow.replace("acc_blacklist_add_", "")
+        target = text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
+        await asyncio.to_thread(db.add_account_blacklist_db, s_name, target)
+        context.user_data.clear()
+        await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
+
+    elif flow == "blacklist":
+        target = "@" + text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
+        if uid not in blacklisted_groups:
+            blacklisted_groups[uid] = set()
+        blacklisted_groups[uid].add(target)
+        context.user_data.clear()
+        await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
+
+    elif flow == "redeem":
+        _, msg = await asyncio.to_thread(db.use_license, uid, text)
+        context.user_data.clear()
+        await update.effective_message.reply_text(msg, reply_markup=get_keyboard(uid))
 
 
 def main():
+    db.init_db()
     Thread(target=run_web, daemon=True).start()
     Thread(target=_keep_alive_worker, daemon=True).start()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .connect_timeout(15)
+        .read_timeout(20)
+        .write_timeout(20)
+        .pool_timeout(10)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("unmute_group", unmute_group_command))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    log.info("FARKETMEZDA PLATINUM bot başlatılıyor...")
-    app.run_polling(drop_pending_updates=True)
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, text_handler))
+    app.run_polling(drop_pending_updates=True, poll_interval=0.5, timeout=15)
 
 
 if __name__ == "__main__":
