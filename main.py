@@ -19,7 +19,7 @@ from telethon.errors import (
     UserDeactivatedBanError,
     ChatWriteForbiddenError,
 )
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -73,7 +73,6 @@ API_HASH = os.environ["API_HASH"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 clients, pending, tasks, blacklisted_groups, failed_reports_cache = {}, {}, {}, {}, {}
-# s_name -> {group_id_str: {"title": str, "reason": str}}
 restricted_groups_by_account: dict[str, dict[str, dict[str, str]]] = {}
 _active_single_accounts: set[str] = set()
 _explicitly_stopped_users: set[int] = set()
@@ -313,7 +312,6 @@ async def start(update, context):
 
 
 async def unmute_group_command(update, context):
-    """Kullanım: /unmute_group <grup_id veya grup_adı>"""
     uid = update.effective_user.id
     args = context.args or []
     query_txt = " ".join(args).strip().lower()
@@ -323,8 +321,7 @@ async def unmute_group_command(update, context):
     if not query_txt:
         await update.effective_message.reply_text(
             "ℹ️ Mute/engel kaldırmak için komutla birlikte grup ID veya grup adını yazın.\n"
-            "Örnek: `/unmute_group -1001234567890` veya `/unmute_group Arayış Grubu`\n"
-            "Dilerseniz ana menüdeki **🚧 Yazılamayan / Muteli Gruplar** butonundan tek tek açabilirsiniz.",
+            "Örnek: `/unmute_group -1001234567890` veya `/unmute_group Arayış Grubu`",
             parse_mode="Markdown",
         )
         return
@@ -352,16 +349,10 @@ async def show_guide(update, context):
     guide_text = (
         "📖 **FARKETMEZDA PLATINUM | KURULUM VE ÖDEME REHBERİ**\n\n"
         "> **1️⃣ Nasıl Satın Alınır ve Ödeme Nasıl Yapılır?**\n"
-        "• Botumuzu kullanmaya başlamak için bütçene uygun paketi seçmelisin *(Günlük 200 TL, Haftalık 400 TL, Aylık 1000 TL)*.\n"
-        "• Ödeme ve lisans keyi temini için admin hesabımızla iletişime geç: **`@farketmezda`** 💬\n"
-        "• Ödemeniz onaylandığı anda size özel **İsimli Lisans Keyi** anında tanımlanır.\n\n"
-        "> **2️⃣ Bot Nasıl Kurulur ve Aktif Edilir?**\n"
-        "• **Adım 1:** Lisans keyinizi ilgili alana girerek aktive edin.\n"
-        "• **Adım 2:** \"Hesaplarım\" menüsünden Telegram hesaplarınızı bağlayın.\n"
-        "• **Adım 3:** Her hesaba özel **reklam metninizi** ister Kayıtlı Mesajlar'dan ister panelden ayarlayın.\n"
-        "• **Adım 4:** Grup arası bekleme sürelerini ve tur dinlenme aralıklarını yapılandırın.\n"
-        "• **Adım 5:** Ana paneldeki **Başlat/Durdur** butonlarıyla reklam akışını yönetin!\n"
-        "• **Adım 6:** Muteli/yazılamayan grupları **Yazılamayan / Muteli Gruplar** menüsünden veya `/unmute_group` ile açabilirsiniz!"
+        "• Günlük 200 TL, Haftalık 400 TL, Aylık 1000 TL.\n"
+        "• İletişim: **`@farketmezda`** 💬\n\n"
+        "> **2️⃣ Bot Nasıl Kurulur?**\n"
+        "• Lisans keyini girin, hesapları bağlayın, reklam metni/süre ayarlayın ve Başlat/Durdur menüsünden yönetin."
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
@@ -544,7 +535,6 @@ async def _sleep_exact_seconds(seconds, uid, task_key, target_s_name):
     start_mono = time.monotonic()
     target_mono = start_mono + float(total)
     last_running_check = 0.0
-    is_still_running = True
 
     while True:
         if int(uid) in _explicitly_stopped_users:
@@ -556,8 +546,7 @@ async def _sleep_exact_seconds(seconds, uid, task_key, target_s_name):
         if (now_mono - last_running_check) >= 2.0:
             last_running_check = now_mono
             u_info = await asyncio.to_thread(db.get_user, uid)
-            is_still_running = (u_info or {}).get("is_running", 0) != 0
-            if not is_still_running:
+            if (u_info or {}).get("is_running", 0) == 0:
                 raise asyncio.CancelledError()
 
         remaining = target_mono - time.monotonic()
@@ -676,9 +665,8 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                             await asyncio.to_thread(_set_single_account_state, s_name, False)
                             try:
                                 await asyncio.to_thread(db.delete_session_db, s_name)
-                                log.warning(f"Geçersiz oturum veritabanından silindi: {s_name} ({phone})")
-                            except Exception as del_err:
-                                log.error(f"Geçersiz oturum silinemedi ({s_name}): {del_err}")
+                            except Exception:
+                                pass
                             await _notify_error(
                                 context,
                                 chat_id,
@@ -712,7 +700,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
-                            log.warning(f"Kayıtlı mesaj alınamadı ({phone}): {e}")
                             await _notify_error(
                                 context,
                                 chat_id,
@@ -741,7 +728,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
-                        log.error(f"Grup listesi alınamadı ({phone}): {e}")
                         await _safe_disconnect(client)
                         active_clients.pop(s_name, None)
                         await _notify_error(
@@ -798,7 +784,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                     raise
                                 except FloodWaitError as exc:
                                     wait_sec = int(getattr(exc, "seconds", 30)) + 2
-                                    log.warning(f"FloodWait ({phone} - {g_title}): {wait_sec}s bekleniyor, sonra devam edilecek.")
                                     await _notify_error(
                                         context,
                                         chat_id,
@@ -817,11 +802,10 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                             chat_id,
                                             f"Yazma Kisiti / Mute - {phone} ({g_title})",
                                             exc,
-                                            "Grup 'Yazilamayan / Muteli Gruplar' listesine alindi. Kurucu muteyi acinca listeden cikarip tekrar reklam atabilirsiniz.",
+                                            "Grup 'Yazilamayan / Muteli Gruplar' listesine alindi.",
                                         )
                                         break
                                     if _is_connection_drop_error(exc):
-                                        log.warning(f"Bağlantı koptu ({phone} - {g_title}), yeniden bağlanıp tekrar deneniyor: {exc}")
                                         await _notify_error(
                                             context,
                                             chat_id,
@@ -849,7 +833,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                         except Exception as retry_exc:
                                             if _is_write_restricted_error(retry_exc):
                                                 _add_restricted_group(s_name, g_id, g_title, str(retry_exc))
-                                            log.error(f"Yeniden denemede mesaj hatası ({g_title}): {retry_exc}")
                                             fail_count += 1
                                             failed_group_list.append(g_title)
                                             await _notify_error(
@@ -860,7 +843,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                                 "Siradaki grupla reklama devam ediliyor.",
                                             )
                                             break
-                                    log.error(f"Mesaj gönderim hatası ({g_title}): {exc}")
                                     fail_count += 1
                                     failed_group_list.append(g_title)
                                     await _notify_error(
@@ -873,7 +855,6 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                                     break
 
                         group_interval = await _get_effective_delay(uid, s_name)
-                        log.info(f"[{phone}] Grup adımı bitti | beklenen süre: {group_interval}s | did_send={did_send}")
                         if did_send and group_interval > 0 and idx < len(groups) - 1:
                             await _sleep_exact_seconds(group_interval, uid, task_key, target_s_name)
 
@@ -898,16 +879,13 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     except Exception:
                         pass
 
-                    log.info(f"[{phone}] Tur #{tour_index} bitti | dinlenme: {loop_interval}s")
                     await _safe_disconnect(active_clients.pop(s_name, None))
                     if loop_interval > 0:
                         await _sleep_exact_seconds(loop_interval, uid, task_key, target_s_name)
-                    log.info(f"[{phone}] Tur dinlenmesi bitti, sonraki tura geçiliyor.")
 
             except asyncio.CancelledError:
                 raise
             except Exception as tour_err:
-                log.exception("Tur içinde beklenmeyen hata, döngü kaldığı yerden sürdürülecek: %s", tour_err)
                 for _, c in list(active_clients.items()):
                     await _safe_disconnect(c)
                 active_clients.clear()
@@ -916,20 +894,19 @@ async def sender_loop(uid, context, chat_id, target_s_name=None):
                     chat_id,
                     "Tur Dongusu",
                     tour_err,
-                    "10 saniye sonra reklama kaldigi yerden devam edilecek (sistem kapanmiyor).",
+                    "10 saniye sonra reklama kaldigi yerden devam edilecek.",
                 )
                 await asyncio.sleep(10)
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        log.exception("Döngü kritik hata, yeniden başlatılıyor: %s", e)
         await _notify_error(
             context,
             chat_id,
             "Ana Dongu",
             e,
-            "10 saniye sonra dongu yeniden baslatilacak, durmayacak.",
+            "10 saniye sonra dongu yeniden baslatilacak.",
         )
         await asyncio.sleep(10)
         if int(uid) not in _explicitly_stopped_users and tasks.get(task_key) is asyncio.current_task():
@@ -974,9 +951,6 @@ async def stop_sender(uid, chat_id, context, target_s_name=None):
 
 
 async def resume_active_users_background(application):
-    # Kullanıcı tarafından açıkça 'Başlat' komutu/butonu verilmeden otomatik başlatma yapılmaz.
-    # Durdurulmuş veya başlatılmamış hesaplar deploy sonrasında kendi kendine başlamaz;
-    # yalnızca kullanıcı 'Başlat' dediğinde akış kaldığı yerden başlar.
     log.info("Açılışta otomatik başlatma kapalı: yalnızca kullanıcı Başlat komutu/butonu verdiğinde çalışacak.")
 
 
@@ -1161,7 +1135,7 @@ async def button(update, context):
     elif action.startswith("start_one_"):
         s_name = action.replace("start_one_", "")
         await start_sender(uid, q.message.chat_id, context, target_s_name=s_name, force_restart=True)
-        await q.message.reply_text("▶ **Seçilen hesap için reklam başlatıldı! (Sürekli otomatik döngüde çalışacak)**", parse_mode="Markdown")
+        await q.message.reply_text("▶ **Seçilen hesap için reklam başlatıldı!**", parse_mode="Markdown")
     elif action.startswith("stop_one_"):
         s_name = action.replace("stop_one_", "")
         await stop_sender(uid, q.message.chat_id, context, target_s_name=s_name)
@@ -1170,7 +1144,7 @@ async def button(update, context):
         context.user_data["flow"] = f"acc_text_input_{s_name}"
         await q.edit_message_text(
             "✍️ Bu hesabın göndereceği **özel reklam metnini** yazın.\n\n"
-            "💡 _Not: Kayıtlı Mesajlar kullanmak istiyorsanız `sil` yazın._",
+            "💡 _Kayıtlı Mesajlar kullanmak için `sil` yazın._",
             parse_mode="Markdown",
             reply_markup=sub_menu_keyboard(),
         )
@@ -1178,7 +1152,7 @@ async def button(update, context):
         s_name = action.replace("set_acc_times_", "")
         context.user_data["flow"] = f"acc_times_delay_{s_name}"
         await q.edit_message_text(
-            "⏱ Bu hesap için **grup arası bekleme süresini (saniye)** yazın (Örn: `10` veya `0`):",
+            "⏱ Bu hesap için **grup arası bekleme süresini (saniye)** yazın:",
             parse_mode="Markdown",
             reply_markup=sub_menu_keyboard(),
         )
@@ -1254,7 +1228,7 @@ async def button(update, context):
     elif action == "key_create" and is_admin(uid):
         context.user_data["flow"] = "key_note_and_days"
         await q.edit_message_text(
-            "➕ **İsimli KEY Üretimi**\n\nFormat: `İsim,GünSayısı` (Örn: `Ahmet Bey,30`)",
+            "➕ **İsimli KEY Üretimi**\n\nFormat: `İsim,GünSayısı`",
             parse_mode="Markdown",
             reply_markup=admin_keyboard(),
         )
@@ -1358,7 +1332,7 @@ async def text_handler(update, context):
             context.user_data["flow"] = f"acc_times_loop_{s_name}"
             await update.effective_message.reply_text(
                 f"✅ Grup arası bekleme süresi `{val}` saniye kaydedildi.\n\n"
-                "⏱ Şimdi bu hesap için **Tur Dinlenme Süresini (saniye)** yazın (Örn: `600` veya `0`):",
+                "⏱ Şimdi **Tur Dinlenme Süresini (saniye)** yazın:",
                 parse_mode="Markdown",
                 reply_markup=sub_menu_keyboard(),
             )
@@ -1443,7 +1417,12 @@ async def text_handler(update, context):
                 "session_name": session_name,
             }
             context.user_data["flow"] = "code"
-            await update.effective_message.reply_text("📲 Telegram kodunu girin:")
+            await update.effective_message.reply_text(
+                "📲 Kod **Telegram uygulamanızdaki resmi 'Telegram' sohbetine** gönderildi.\n"
+                "Lütfen o sohbeti kontrol edip gelen kodu girin:",
+                parse_mode="Markdown",
+                reply_markup=sub_menu_keyboard(),
+            )
         except Exception as e:
             await _safe_disconnect(client)
             await update.effective_message.reply_text(f"Hata: {e}")
@@ -1451,9 +1430,14 @@ async def text_handler(update, context):
     elif flow == "code":
         item = pending.get(uid)
         if not item:
+            await update.effective_message.reply_text(
+                "⚠️ Oturum isteği sıfırlanmış, lütfen numarayı tekrar girin.",
+                reply_markup=get_keyboard(uid),
+            )
             return
+        code_clean = re.sub(r"\s+", "", text)
         try:
-            await item["client"].sign_in(phone=item["phone"], code=text, phone_code_hash=item["hash"])
+            await item["client"].sign_in(phone=item["phone"], code=code_clean, phone_code_hash=item["hash"])
             s_name = item["session_name"]
             raw_s_string = item["client"].session.save()
             await _safe_disconnect(item["client"])
