@@ -352,7 +352,7 @@ async def show_guide(update, context):
         "• Günlük 200 TL, Haftalık 400 TL, Aylık 1000 TL.\n"
         "• İletişim: **`@farketmezda`** 💬\n\n"
         "> **2️⃣ Bot Nasıl Kurulur?**\n"
-        "• Lisans keyini girin, hesapları bağlayın, reklam metni/süre ayarlayın ve Başlat/Durdur menüsünden yönetin."
+        "• Lisans keyini girin, `StringSession` ile hesapları bağlayın, reklam metni/süre ayarlayın ve Başlat/Durdur menüsünden yönetin."
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
@@ -423,10 +423,10 @@ async def _safe_disconnect(client):
         pass
 
 
-async def _verify_and_save_session(uid, s_name, phone, s_string):
-    clean_string = (s_string or "").strip().strip('"').strip("'").replace("\n", "").strip()
-    if not clean_string:
-        raise RuntimeError("Oturum anahtarı boş oluştu.")
+async def _verify_and_save_string_session(uid, s_string):
+    clean_string = (s_string or "").strip().strip('"').strip("'").replace("\n", "").replace(" ", "").strip()
+    if not clean_string or len(clean_string) < 20:
+        raise RuntimeError("Geçersiz veya eksik StringSession metni.")
 
     verify_client = TelegramClient(
         StringSession(clean_string),
@@ -442,9 +442,20 @@ async def _verify_and_save_session(uid, s_name, phone, s_string):
         me_user = await asyncio.wait_for(verify_client.get_me(), timeout=15)
         if me_user is None:
             raise RuntimeError("Oturum doğrulaması tamamlanamadı.")
+
+        raw_phone = getattr(me_user, "phone", None) or ""
+        phone_clean = str(raw_phone).strip()
+        if phone_clean and not phone_clean.startswith("+"):
+            phone_clean = f"+{phone_clean}"
+        display_phone = phone_clean or (f"@{me_user.username}" if getattr(me_user, "username", None) else f"ID:{me_user.id}")
+
+        s_name = f"SESSION_{uid}_{me_user.id}"
         final_string = verify_client.session.save() or clean_string
         username = me_user.username if me_user.username else ""
-        await asyncio.to_thread(db.save_session_db, uid, s_name, phone, final_string, username=username)
+
+        await asyncio.to_thread(db.save_session_db, uid, s_name, display_phone, final_string, username=username)
+        clients.pop(s_name, None)
+        return s_name, display_phone, username
     finally:
         await _safe_disconnect(verify_client)
 
@@ -1073,9 +1084,11 @@ async def button(update, context):
         if not await asyncio.to_thread(has_valid_access, uid):
             await q.edit_message_text("❌ Aktif lisansınız yok.", reply_markup=sub_menu_keyboard())
             return
-        context.user_data["flow"] = "phone"
+        context.user_data["flow"] = "awaiting_string_session"
         await q.edit_message_text(
-            "➕ Telefon numaranızı +ülke kodu ile gönderin (`+90...`):",
+            "➕ **StringSession ile Hesap Ekle**\n\n"
+            "Render IP engeli nedeniyle numara yerine doğrudan **StringSession** metnini yapıştırın.\n"
+            "Deploy almadan anında veritabanına kaydedilir:",
             parse_mode="Markdown",
             reply_markup=sub_menu_keyboard(),
         )
@@ -1391,83 +1404,28 @@ async def text_handler(update, context):
         await update.effective_message.reply_text("✅ Duyuru iletildi.", reply_markup=admin_keyboard())
         return
 
-    if flow == "phone":
-        if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
-            await update.effective_message.reply_text("Geçerli numara girin (+90...)")
+    if flow == "awaiting_string_session":
+        if not await asyncio.to_thread(has_valid_access, uid):
+            context.user_data.clear()
+            await update.effective_message.reply_text("❌ Aktif lisansınız yok.", reply_markup=get_keyboard(uid))
             return
-        old_pending = pending.pop(uid, None)
-        if old_pending:
-            await _safe_disconnect(old_pending.get("client"))
-        session_name = f"SESSION_{uid}_{text}"
-        client = TelegramClient(
-            StringSession(),
-            API_ID,
-            API_HASH,
-            connection_retries=3,
-            auto_reconnect=False,
-            timeout=20,
-        )
-        await client.connect()
         try:
-            sent = await client.send_code_request(text)
-            pending[uid] = {
-                "client": client,
-                "phone": text,
-                "hash": sent.phone_code_hash,
-                "session_name": session_name,
-            }
-            context.user_data["flow"] = "code"
+            _, display_phone, username = await _verify_and_save_string_session(uid, text)
+            context.user_data.clear()
+            etiket = f"@{username} | {display_phone}" if username else display_phone
             await update.effective_message.reply_text(
-                "📲 Kod **Telegram uygulamanızdaki resmi 'Telegram' sohbetine** gönderildi.\n"
-                "Lütfen o sohbeti kontrol edip gelen kodu girin:",
+                f"✅ **Hesap veritabanına kaydedildi!**\n📱 Hesap: `{etiket}`\n"
+                "♻️ *Deploy gerekmez; Başlat menüsünden hemen çalıştırabilirsin.*",
+                parse_mode="Markdown",
+                reply_markup=get_keyboard(uid),
+            )
+        except Exception as e:
+            await update.effective_message.reply_text(
+                f"❌ **Oturum eklenemedi:** `{_sanitize_notify_text(e)}`\n"
+                "StringSession metnini eksiksiz yapıştırıp tekrar dene.",
                 parse_mode="Markdown",
                 reply_markup=sub_menu_keyboard(),
             )
-        except Exception as e:
-            await _safe_disconnect(client)
-            await update.effective_message.reply_text(f"Hata: {e}")
-
-    elif flow == "code":
-        item = pending.get(uid)
-        if not item:
-            await update.effective_message.reply_text(
-                "⚠️ Oturum isteği sıfırlanmış, lütfen numarayı tekrar girin.",
-                reply_markup=get_keyboard(uid),
-            )
-            return
-        code_clean = re.sub(r"\s+", "", text)
-        try:
-            await item["client"].sign_in(phone=item["phone"], code=code_clean, phone_code_hash=item["hash"])
-            s_name = item["session_name"]
-            raw_s_string = item["client"].session.save()
-            await _safe_disconnect(item["client"])
-            clients.pop(s_name, None)
-            await _verify_and_save_session(uid, s_name, item["phone"], raw_s_string)
-            pending.pop(uid, None)
-            context.user_data.clear()
-            await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
-        except SessionPasswordNeededError:
-            context.user_data["flow"] = "2fa"
-            await update.effective_message.reply_text("🔒 2FA şifrenizi girin:")
-        except Exception as e:
-            await update.effective_message.reply_text(f"Hata: {e}")
-
-    elif flow == "2fa":
-        item = pending.get(uid)
-        if not item:
-            return
-        try:
-            await item["client"].sign_in(password=text)
-            s_name = item["session_name"]
-            raw_s_string = item["client"].session.save()
-            await _safe_disconnect(item["client"])
-            clients.pop(s_name, None)
-            await _verify_and_save_session(uid, s_name, item["phone"], raw_s_string)
-            pending.pop(uid, None)
-            context.user_data.clear()
-            await update.effective_message.reply_text("✅ Hesap bağlandı!", reply_markup=get_keyboard(uid))
-        except Exception as e:
-            await update.effective_message.reply_text(f"Hata: {e}")
 
     elif flow.startswith("acc_blacklist_add_"):
         s_name = flow.replace("acc_blacklist_add_", "")
