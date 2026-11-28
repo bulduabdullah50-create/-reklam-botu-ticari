@@ -250,6 +250,13 @@ def sub_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")]])
 
 
+def add_account_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ StringSession ile Direkt Ekle", callback_data="direct_session_mode")],
+        [InlineKeyboardButton("⬅ Geri / Ana Menü", callback_data="home")],
+    ])
+
+
 def admin_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -344,6 +351,33 @@ async def unmute_group_command(update, context):
         await update.effective_message.reply_text("⚠️ Yazılamayan gruplar listesinde eşleşen bir grup bulunamadı.")
 
 
+async def quick_add_session_command(update, context):
+    uid = update.effective_user.id
+    if not await asyncio.to_thread(has_valid_access, uid):
+        await update.effective_message.reply_text("❌ Aktif lisansınız yok.")
+        return
+    raw_session = " ".join(context.args or []).strip()
+    if not raw_session:
+        await update.effective_message.reply_text(
+            "⚡ Hızlı ekleme: `/ekle <StringSession>`",
+            parse_mode="Markdown",
+        )
+        return
+    try:
+        _, display_phone, username = await _verify_and_save_string_session(uid, raw_session)
+        etiket = f"@{username} | {display_phone}" if username else display_phone
+        await update.effective_message.reply_text(
+            f"✅ **Hesap anında kaydedildi!**\n📱 `{etiket}`\n♻️ *Deploy gerekmez.*",
+            parse_mode="Markdown",
+            reply_markup=get_keyboard(uid),
+        )
+    except Exception as e:
+        await update.effective_message.reply_text(
+            f"❌ **Eklenemedi:** `{_sanitize_notify_text(e)}`",
+            parse_mode="Markdown",
+        )
+
+
 async def show_guide(update, context):
     q = update.callback_query
     guide_text = (
@@ -352,7 +386,7 @@ async def show_guide(update, context):
         "• Günlük 200 TL, Haftalık 400 TL, Aylık 1000 TL.\n"
         "• İletişim: **`@farketmezda`** 💬\n\n"
         "> **2️⃣ Bot Nasıl Kurulur?**\n"
-        "• Lisans keyini girin, `StringSession` ile hesapları bağlayın, reklam metni/süre ayarlayın ve Başlat/Durdur menüsünden yönetin."
+        "• Lisans keyini girin, `➕ Hesap Ekle` veya `/ekle` ile hesap bağlayın, metin/süre ayarlayın ve Başlat/Durdur menüsünden yönetin."
     )
     await q.edit_message_text(guide_text, parse_mode="Markdown", reply_markup=sub_menu_keyboard())
 
@@ -423,7 +457,7 @@ async def _safe_disconnect(client):
         pass
 
 
-async def _verify_and_save_string_session(uid, s_string):
+async def _verify_and_save_string_session(uid, s_string, fallback_phone: str = ""):
     clean_string = (s_string or "").strip().strip('"').strip("'").replace("\n", "").replace(" ", "").strip()
     if not clean_string or len(clean_string) < 20:
         raise RuntimeError("Geçersiz veya eksik StringSession metni.")
@@ -443,7 +477,7 @@ async def _verify_and_save_string_session(uid, s_string):
         if me_user is None:
             raise RuntimeError("Oturum doğrulaması tamamlanamadı.")
 
-        raw_phone = getattr(me_user, "phone", None) or ""
+        raw_phone = getattr(me_user, "phone", None) or fallback_phone or ""
         phone_clean = str(raw_phone).strip()
         if phone_clean and not phone_clean.startswith("+"):
             phone_clean = f"+{phone_clean}"
@@ -1084,11 +1118,21 @@ async def button(update, context):
         if not await asyncio.to_thread(has_valid_access, uid):
             await q.edit_message_text("❌ Aktif lisansınız yok.", reply_markup=sub_menu_keyboard())
             return
+        context.user_data["flow"] = "phone"
+        await q.edit_message_text(
+            "➕ Telefon numaranızı `+ülke kodu` ile gönderin (`+90...`).\n"
+            "Kod Render'da kesilirse doğrudan `StringSession` da yapıştırabilirsin:",
+            parse_mode="Markdown",
+            reply_markup=add_account_keyboard(),
+        )
+    elif action == "direct_session_mode":
+        if not await asyncio.to_thread(has_valid_access, uid):
+            await q.edit_message_text("❌ Aktif lisansınız yok.", reply_markup=sub_menu_keyboard())
+            return
         context.user_data["flow"] = "awaiting_string_session"
         await q.edit_message_text(
-            "➕ **StringSession ile Hesap Ekle**\n\n"
-            "Render IP engeli nedeniyle numara yerine doğrudan **StringSession** metnini yapıştırın.\n"
-            "Deploy almadan anında veritabanına kaydedilir:",
+            "⚡ **StringSession ile Direkt Ekle**\n\n"
+            "Oturum metnini buraya yapıştır; deploy almadan anında veritabanına kaydedilsin:",
             parse_mode="Markdown",
             reply_markup=sub_menu_keyboard(),
         )
@@ -1410,7 +1454,8 @@ async def text_handler(update, context):
             await update.effective_message.reply_text("❌ Aktif lisansınız yok.", reply_markup=get_keyboard(uid))
             return
         try:
-            _, display_phone, username = await _verify_and_save_string_session(uid, text)
+            fb_phone = context.user_data.get("pending_phone", "")
+            _, display_phone, username = await _verify_and_save_string_session(uid, text, fallback_phone=fb_phone)
             context.user_data.clear()
             etiket = f"@{username} | {display_phone}" if username else display_phone
             await update.effective_message.reply_text(
@@ -1424,52 +1469,51 @@ async def text_handler(update, context):
                 f"❌ **Oturum eklenemedi:** `{_sanitize_notify_text(e)}`\n"
                 "StringSession metnini eksiksiz yapıştırıp tekrar dene.",
                 parse_mode="Markdown",
-                reply_markup=sub_menu_keyboard(),
+                reply_markup=add_account_keyboard(),
             )
 
-    elif flow.startswith("acc_blacklist_add_"):
-        s_name = flow.replace("acc_blacklist_add_", "")
-        target = text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
-        await asyncio.to_thread(db.add_account_blacklist_db, s_name, target)
-        context.user_data.clear()
-        await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
-
-    elif flow == "blacklist":
-        target = "@" + text.replace("https://t.me/", "").replace("t.me/", "").strip().lstrip("@").lower()
-        if uid not in blacklisted_groups:
-            blacklisted_groups[uid] = set()
-        blacklisted_groups[uid].add(target)
-        context.user_data.clear()
-        await update.effective_message.reply_text(f"✅ Engellendi: {target}", reply_markup=get_keyboard(uid))
-
-    elif flow == "redeem":
-        _, msg = await asyncio.to_thread(db.use_license, uid, text)
-        context.user_data.clear()
-        await update.effective_message.reply_text(msg, reply_markup=get_keyboard(uid))
-
-
-def main():
-    db.init_db()
-    Thread(target=run_web, daemon=True).start()
-    Thread(target=_keep_alive_worker, daemon=True).start()
-
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .connect_timeout(15)
-        .read_timeout(20)
-        .write_timeout(20)
-        .pool_timeout(10)
-        .build()
-    )
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("unmute_group", unmute_group_command))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(MessageHandler(filters.PHOTO, text_handler))
-    app.run_polling(drop_pending_updates=True, poll_interval=0.5, timeout=15)
-
-
-if __name__ == "__main__":
-    main()
+    elif flow == "phone":
+        if not re.fullmatch(r"\+[1-9]\d{7,14}", text):
+            await update.effective_message.reply_text(
+                "Geçerli numara girin (`+90...`) veya `StringSession` yapıştırın:",
+                parse_mode="Markdown",
+                reply_markup=add_account_keyboard(),
+            )
+            return
+        old_pending = pending.pop(uid, None)
+        if old_pending:
+            await _safe_disconnect(old_pending.get("client"))
+        session_name = f"SESSION_{uid}_{text}"
+        context.user_data["pending_phone"] = text
+        client = TelegramClient(
+            StringSession(),
+            API_ID,
+            API_HASH,
+            connection_retries=3,
+            auto_reconnect=False,
+            timeout=20,
+        )
+        await client.connect()
+        try:
+            sent = await client.send_code_request(text)
+            pending[uid] = {
+                "client": client,
+                "phone": text,
+                "hash": sent.phone_code_hash,
+                "session_name": session_name,
+            }
+            context.user_data["flow"] = "code"
+            await update.effective_message.reply_text(
+                "📲 Kod isteği gönderildi; Telegram uygulamasındaki **Telegram** sohbetini kontrol et ve gelen kodu yaz.\n"
+                "_Kod gelmezse doğrudan `StringSession` yapıştırabilirsin:_",
+                parse_mode="Markdown",
+                reply_markup=add_account_keyboard(),
+            )
+        except Exception as e:
+            await _safe_disconnect(client)
+            context.user_data["flow"] = "awaiting_string_session"
+            await update.effective_message.reply_text(
+                f"⚠️ Render'da kod isteği engellendi (`{_sanitize_notify_text(e)}`).\n"
+                "Uğraşmadan doğrudan **`StringSession`** metnini yapıştır, deploy almadan kaydedelim:",
+                parse_mode="Markdown",
+                reply_markup=add_account_keybo
